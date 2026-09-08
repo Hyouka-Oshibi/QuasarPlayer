@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.dp
 import com.hyouka.quasarplayer.data.Track
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 
 @Composable
 fun TrackArt(
@@ -35,22 +36,41 @@ fun TrackArt(
     iconSize: Dp = 48.dp
 ) {
     val context = LocalContext.current
-    val bitmapState = produceState<ImageBitmap?>(initialValue = null, key1 = track?.uri) {
-        value = if (track?.uri.isNullOrEmpty()) {
-            null
-        } else {
-            withContext(Dispatchers.IO) {
-                try {
-                    val retriever = MediaMetadataRetriever()
-                    retriever.setDataSource(context, Uri.parse(track!!.uri))
-                    val artBytes = retriever.embeddedPicture
-                    retriever.release()
-                    artBytes?.let { bytes ->
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+    val bitmapState = produceState<ImageBitmap?>(initialValue = null, key1 = track?.id ?: track?.uri) {
+        value = withContext(Dispatchers.IO) {
+            if (track != null) {
+                // 1. Try local artwork file saved directly during download
+                if (!track.artworkPath.isNullOrEmpty()) {
+                    val artFile = File(track.artworkPath)
+                    if (artFile.exists()) {
+                        val bmp = BitmapFactory.decodeFile(artFile.absolutePath)
+                        if (bmp != null) return@withContext bmp.asImageBitmap()
                     }
-                } catch (e: Exception) {
+                }
+
+                // 2. Fallback to MediaMetadataRetriever ID3 APIC embedded frame
+                if (!track.uri.isNullOrEmpty()) {
+                    try {
+                        val retriever = MediaMetadataRetriever()
+                        val uri = Uri.parse(track.uri)
+                        if (uri.scheme == "content" || uri.scheme == "file") {
+                            retriever.setDataSource(context, uri)
+                        } else {
+                            retriever.setDataSource(track.uri)
+                        }
+                        val artBytes = retriever.embeddedPicture
+                        retriever.release()
+                        artBytes?.let { bytes ->
+                            BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                        }
+                    } catch (e: Exception) {
+                        null
+                    }
+                } else {
                     null
                 }
+            } else {
+                null
             }
         }
     }

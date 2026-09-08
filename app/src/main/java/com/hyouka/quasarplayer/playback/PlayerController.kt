@@ -3,8 +3,10 @@ package com.hyouka.quasarplayer.playback
 import android.content.ComponentName
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
@@ -16,6 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import java.io.File
 
 data class PlayerState(
     val currentTrack: Track? = null,
@@ -27,10 +30,6 @@ data class PlayerState(
     val queue: List<Track> = emptyList()
 )
 
-/**
- * UI-facing wrapper around MediaController.
- * Connects to PlaybackService and exposes playback state as a StateFlow.
- */
 class PlayerController(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
@@ -69,6 +68,10 @@ class PlayerController(private val context: Context) {
 
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
             _state.update { it.copy(shuffleModeEnabled = shuffleModeEnabled) }
+        }
+
+        override fun onPlayerError(error: PlaybackException) {
+            Log.e("PlayerController", "Playback Error: ${error.message}", error)
         }
     }
 
@@ -153,6 +156,7 @@ class PlayerController(private val context: Context) {
         activeQueueTracks = tracks
 
         val mediaItems = tracks.map { track ->
+            val uri = parseUri(track.uri)
             val metadata = MediaMetadata.Builder()
                 .setTitle(track.title)
                 .setArtist(track.artist ?: "Unknown Artist")
@@ -160,7 +164,7 @@ class PlayerController(private val context: Context) {
 
             MediaItem.Builder()
                 .setMediaId(track.id)
-                .setUri(Uri.parse(track.uri))
+                .setUri(uri)
                 .setMediaMetadata(metadata)
                 .build()
         }
@@ -170,6 +174,15 @@ class PlayerController(private val context: Context) {
         controller.prepare()
         controller.play()
         updateStateFromController()
+    }
+
+    private fun parseUri(raw: String): Uri {
+        val trimmed = raw.trim()
+        return when {
+            trimmed.startsWith("content://") || trimmed.startsWith("file://") || trimmed.startsWith("http://") || trimmed.startsWith("https://") -> Uri.parse(trimmed)
+            trimmed.startsWith("/") -> Uri.fromFile(File(trimmed))
+            else -> Uri.parse(trimmed)
+        }
     }
 
     fun play() {

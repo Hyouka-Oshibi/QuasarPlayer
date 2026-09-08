@@ -65,7 +65,7 @@ class MainActivity : ComponentActivity() {
         playerController = PlayerController(applicationContext)
         settingsRepository = SettingsRepository(applicationContext)
         sourceExtractor = SourceExtractor(applicationContext)
-        downloader = Downloader(applicationContext, libraryRepository)
+        downloader = Downloader(applicationContext, libraryRepository, sourceExtractor)
 
         setContent {
             val themeState by settingsRepository.themeFlow.collectAsState(initial = AppTheme.SYSTEM)

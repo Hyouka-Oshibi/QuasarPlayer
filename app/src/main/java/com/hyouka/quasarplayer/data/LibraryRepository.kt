@@ -2,7 +2,11 @@ package com.hyouka.quasarplayer.data
 
 import android.content.ContentUris
 import android.content.Context
+import android.net.Uri
+import android.os.Environment
 import android.provider.MediaStore
+import com.hyouka.quasarplayer.source.SearchResult
+import com.hyouka.quasarplayer.source.SourceType
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
 import com.squareup.moshi.adapter
@@ -12,29 +16,22 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.security.MessageDigest
 
-/**
- * Single source of truth for the music library: scans MediaStore for the
- * configured folder, caches results in library_index.json so we don't
- * re-read tags on every launch, and reads/writes per-playlist JSON files.
- *
- * First pass — folder path is hardcoded to a dedicated subfolder for now.
- * Swap for a user-configurable SAF folder pick once the settings screen
- * is wired up.
- */
 class LibraryRepository(private val context: Context) {
+
+    var savedSearchQuery: String = ""
+    var savedSelectedSource: SourceType = SourceType.YOUTUBE
+    var savedSearchResults: List<SearchResult> = emptyList()
 
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
     private val indexFile: File
         get() = File(context.filesDir, "library_index.json")
 
-    private val playlistsDir: File
-        get() = File(context.filesDir, "playlists").apply { mkdirs() }
-
     // --- scanning -----------------------------------------------------
 
     suspend fun scanLibrary(): List<Track> = withContext(Dispatchers.IO) {
-        val tracks = mutableListOf<Track>()
+        val cachedIndex = loadCachedIndex().associateBy { it.id }.toMutableMap()
+        val scannedTracksMap = mutableMapOf<String, Track>()
 
         val projection = arrayOf(
             MediaStore.Audio.Media._ID,
@@ -45,43 +42,110 @@ class LibraryRepository(private val context: Context) {
             MediaStore.Audio.Media.RELATIVE_PATH
         )
 
-        // Restrict to our dedicated folder so we only ever see files the
-        // app itself manages, never the user's whole phone library.
         val selection = "${MediaStore.Audio.Media.RELATIVE_PATH} LIKE ?"
         val selectionArgs = arrayOf("%Music/QuasarPlayer%")
 
-        context.contentResolver.query(
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-            projection,
-            selection,
-            selectionArgs,
-            null
-        )?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
-            val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
-            val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
-            val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
-            val modifiedCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+        // 1. Query MediaStore
+        try {
+            context.contentResolver.query(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                projection,
+                selection,
+                selectionArgs,
+                null
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val titleCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                val modifiedCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
 
-            while (cursor.moveToNext()) {
-                val mediaStoreId = cursor.getLong(idCol)
-                val uri = ContentUris.withAppendedId(
-                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, mediaStoreId
-                ).toString()
+                while (cursor.moveToNext()) {
+                    val mediaStoreId = cursor.getLong(idCol)
+                    val uri = ContentUris.withAppendedId(
+                        MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, mediaStoreId
+                    ).toString()
 
-                tracks += Track(
-                    id = stableId(uri),
-                    uri = uri,
-                    title = cursor.getString(titleCol) ?: "Unknown",
-                    artist = cursor.getString(artistCol),
-                    durationMs = cursor.getLong(durationCol),
-                    lastModified = cursor.getLong(modifiedCol)
-                )
+                    val trackId = stableId(uri)
+                    val cached = cachedIndex[trackId]
+
+                    val mediaStoreTitle = cursor.getString(titleCol)
+                    val mediaStoreArtist = cursor.getString(artistCol)
+                    val mediaStoreDuration = cursor.getLong(durationCol)
+
+                    val finalTitle = cached?.title ?: mediaStoreTitle ?: "Unknown Title"
+                    val finalArtist = if (!cached?.artist.isNullOrBlank() && cached?.artist != "<unknown>") {
+                        cached.artist
+                    } else if (!mediaStoreArtist.isNullOrBlank() && mediaStoreArtist != "<unknown>") {
+                        mediaStoreArtist
+                    } else {
+                        "Unknown Artist"
+                    }
+
+                    val finalDuration = if ((cached?.durationMs ?: 0L) > 0L) {
+                        cached!!.durationMs
+                    } else {
+                        mediaStoreDuration
+                    }
+
+                    scannedTracksMap[trackId] = Track(
+                        id = trackId,
+                        uri = uri,
+                        title = finalTitle,
+                        artist = finalArtist,
+                        durationMs = finalDuration,
+                        hasEmbeddedArt = cached?.hasEmbeddedArt ?: false,
+                        artworkPath = cached?.artworkPath,
+                        lastModified = cursor.getLong(modifiedCol)
+                    )
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 2. Direct Physical File Scan in Music/QuasarPlayer (to catch newly downloaded files immediately)
+        try {
+            val musicDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                "QuasarPlayer"
+            )
+            if (musicDir.exists() && musicDir.isDirectory) {
+                val mp3Files = musicDir.listFiles { file -> file.isFile && file.extension.equals("mp3", ignoreCase = true) } ?: emptyArray()
+                for (file in mp3Files) {
+                    val fileUri = Uri.fromFile(file).toString()
+                    val trackId = stableId(fileUri)
+
+                    val cached = cachedIndex[trackId] ?: cachedIndex.values.firstOrNull { it.uri.endsWith(file.name) }
+
+                    if (!scannedTracksMap.containsKey(trackId)) {
+                        scannedTracksMap[trackId] = Track(
+                            id = trackId,
+                            uri = fileUri,
+                            title = cached?.title ?: file.nameWithoutExtension,
+                            artist = cached?.artist ?: "Unknown Artist",
+                            durationMs = cached?.durationMs ?: 0L,
+                            hasEmbeddedArt = cached?.hasEmbeddedArt ?: false,
+                            artworkPath = cached?.artworkPath,
+                            lastModified = file.lastModified()
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Preserve any cached downloaded tracks that weren't caught in query
+        for ((id, cachedTrack) in cachedIndex) {
+            if (!scannedTracksMap.containsKey(id)) {
+                scannedTracksMap[id] = cachedTrack
             }
         }
 
-        saveIndex(tracks)
-        tracks
+        val resultList = scannedTracksMap.values.sortedByDescending { it.lastModified }
+        saveIndex(resultList)
+        resultList
     }
 
     /** Stable ID from the content URI — survives filename changes. */
@@ -97,31 +161,101 @@ class LibraryRepository(private val context: Context) {
             Types.newParameterizedType(List::class.java, Track::class.java)
         )
 
-    private fun saveIndex(tracks: List<Track>) {
+    fun saveIndex(tracks: List<Track>) {
         indexFile.writeText(trackListAdapter.toJson(tracks))
     }
 
-    fun loadCachedIndex(): List<Track> {
-        if (!indexFile.exists()) return emptyList()
-        return trackListAdapter.fromJson(indexFile.readText()) ?: emptyList()
+    fun addTrackToIndex(track: Track) {
+        val current = loadCachedIndex().toMutableList()
+        current.removeAll { it.id == track.id || it.uri == track.uri }
+        current.add(0, track)
+        saveIndex(current)
     }
 
-    // --- playlists --------------------------------------------------------
+    fun deleteTrack(track: Track) {
+        val uri = Uri.parse(track.uri)
 
-    private val playlistAdapter get() = moshi.adapter(Playlist::class.java)
+        // 1. Delete physical file if file URI or direct path
+        if (uri.scheme == "file" || track.uri.startsWith("/")) {
+            val path = uri.path ?: track.uri
+            val file = File(path)
+            if (file.exists()) file.delete()
+        }
 
-    fun listPlaylists(): List<Playlist> =
-        playlistsDir.listFiles { f -> f.extension == "json" }
-            ?.mapNotNull { f -> playlistAdapter.fromJson(f.readText()) }
-            ?: emptyList()
+        // 2. Delete artwork file if present
+        if (!track.artworkPath.isNullOrEmpty()) {
+            val artFile = File(track.artworkPath)
+            if (artFile.exists()) artFile.delete()
+        }
+
+        // 3. Delete from MediaStore if content URI
+        if (uri.scheme == "content") {
+            try {
+                context.contentResolver.delete(uri, null, null)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        // 4. Scan physical music directory for matching file
+        try {
+            val musicDir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
+                "QuasarPlayer"
+            )
+            if (musicDir.exists()) {
+                musicDir.listFiles()?.forEach { f ->
+                    if (f.nameWithoutExtension.equals(track.title.replace(Regex("[^A-Za-z0-9 _-]"), "_").trim(), ignoreCase = true)) {
+                        f.delete()
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // 5. Remove from index cache
+        val current = loadCachedIndex().toMutableList()
+        current.removeAll { it.id == track.id || it.uri == track.uri }
+        saveIndex(current)
+    }
+
+    fun generateStableId(uri: String): String = stableId(uri)
+
+    fun loadCachedIndex(): List<Track> {
+        if (!indexFile.exists()) return emptyList()
+        return try {
+            trackListAdapter.fromJson(indexFile.readText()) ?: emptyList()
+        } catch (e: Exception) {
+            emptyList()
+        }
+    }
+
+    // --- playlists ------------------------------------------------------
+
+    private val playlistDir: File
+        get() = File(context.filesDir, "playlists").apply { mkdirs() }
+
+    private val playlistAdapter
+        get() = moshi.adapter(Playlist::class.java)
+
+    fun listPlaylists(): List<Playlist> {
+        val files = playlistDir.listFiles { _, name -> name.endsWith(".json") } ?: return emptyList()
+        return files.mapNotNull { file ->
+            try {
+                playlistAdapter.fromJson(file.readText())
+            } catch (e: Exception) {
+                null
+            }
+        }.sortedByDescending { it.created }
+    }
 
     fun savePlaylist(playlist: Playlist) {
-        val safeName = playlist.name.replace(Regex("[^A-Za-z0-9_-]"), "_")
-        File(playlistsDir, "$safeName.json").writeText(playlistAdapter.toJson(playlist))
+        val file = File(playlistDir, "${playlist.name}.json")
+        file.writeText(playlistAdapter.toJson(playlist))
     }
 
     fun deletePlaylist(name: String) {
-        val safeName = name.replace(Regex("[^A-Za-z0-9_-]"), "_")
-        File(playlistsDir, "$safeName.json").delete()
+        File(playlistDir, "$name.json").delete()
     }
 }

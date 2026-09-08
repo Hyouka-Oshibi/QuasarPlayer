@@ -21,6 +21,7 @@ import com.hyouka.quasarplayer.data.Playlist
 import com.hyouka.quasarplayer.data.Track
 import com.hyouka.quasarplayer.playback.PlayerController
 import com.hyouka.quasarplayer.source.*
+import com.hyouka.quasarplayer.ui.common.NetworkImage
 import com.hyouka.quasarplayer.ui.common.TrackArt
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
@@ -45,13 +46,13 @@ fun LibraryScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
-    var searchQuery by remember { mutableStateOf("") }
-    var selectedSource by remember { mutableStateOf(SourceType.YOUTUBE) }
+    var searchQuery by remember { mutableStateOf(libraryRepository.savedSearchQuery) }
+    var selectedSource by remember { mutableStateOf(libraryRepository.savedSelectedSource) }
     var isSearching by remember { mutableStateOf(false) }
-    var searchResults by remember { mutableStateOf<List<SearchResult>>(emptyList()) }
+    var searchResults by remember { mutableStateOf<List<SearchResult>>(libraryRepository.savedSearchResults) }
     var previewResult by remember { mutableStateOf<SearchResult?>(null) }
-    var isDownloading by remember { mutableStateOf(false) }
-    var downloadProgress by remember { mutableFloatStateOf(0f) }
+
+    val activeDownloads by downloader.activeDownloads.collectAsState()
 
     var selectedTab by remember { mutableStateOf(LibraryTab.TRACKS) }
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
@@ -61,6 +62,13 @@ fun LibraryScreen(
     var showRenameDialog by remember { mutableStateOf<Track?>(null) }
     var showAddToPlaylistDialog by remember { mutableStateOf<Track?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
+
+    // Synchronize search state to repository so it persists across tab switches
+    LaunchedEffect(searchQuery, selectedSource, searchResults) {
+        libraryRepository.savedSearchQuery = searchQuery
+        libraryRepository.savedSelectedSource = selectedSource
+        libraryRepository.savedSearchResults = searchResults
+    }
 
     val refreshLibrary: () -> Unit = {
         scope.launch(Dispatchers.IO) {
@@ -154,7 +162,7 @@ fun LibraryScreen(
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(max = 240.dp),
+                    .heightIn(max = 260.dp),
                 elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
             ) {
                 LazyColumn(modifier = Modifier.fillMaxWidth()) {
@@ -168,11 +176,26 @@ fun LibraryScreen(
                                 )
                             },
                             leadingContent = {
-                                Icon(
-                                    if (result.source == SourceType.YOUTUBE) Icons.Default.PlayCircle
-                                    else Icons.Default.Cloud,
-                                    contentDescription = null
+                                NetworkImage(
+                                    url = result.thumbnailUrl,
+                                    modifier = Modifier.size(48.dp),
+                                    iconSize = 24.dp
                                 )
+                            },
+                            trailingContent = {
+                                IconButton(
+                                    onClick = {
+                                        scope.launch {
+                                            Toast.makeText(context, "Downloading ${result.title}", Toast.LENGTH_SHORT).show()
+                                            val file = downloader.download(result)
+                                            if (file != null) {
+                                                refreshLibrary()
+                                            }
+                                        }
+                                    }
+                                ) {
+                                    Icon(Icons.Default.Download, contentDescription = "Download Immediately")
+                                }
                             },
                             modifier = Modifier.combinedClickable(
                                 onClick = { previewResult = result }
@@ -184,17 +207,53 @@ fun LibraryScreen(
             }
         }
 
-        if (isDownloading) {
+        // Active Downloads Card List
+        if (activeDownloads.isNotEmpty()) {
             Spacer(modifier = Modifier.height(8.dp))
-            LinearProgressIndicator(
-                progress = { downloadProgress },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Text(
-                "Downloading... ${(downloadProgress * 100).toInt()}%",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.primary
-            )
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        text = "Active Downloads (${activeDownloads.size})",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    activeDownloads.forEach { task ->
+                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Text(
+                                    text = task.title,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                Text(
+                                    text = when (task.status) {
+                                        DownloadStatus.DOWNLOADING -> "${(task.progress * 100).toInt()}%"
+                                        DownloadStatus.COMPLETED -> "Done"
+                                        DownloadStatus.FAILED -> "Failed"
+                                    },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (task.status == DownloadStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                                )
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            if (task.status == DownloadStatus.DOWNLOADING) {
+                                LinearProgressIndicator(
+                                    progress = { task.progress },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -318,14 +377,10 @@ fun LibraryScreen(
             searchResult = result,
             sourceExtractor = sourceExtractor,
             onDismiss = { previewResult = null },
-            onDownloadRequested = { info ->
+            onDownloadRequested = { searchRes ->
                 scope.launch {
-                    isDownloading = true
-                    downloadProgress = 0f
-                    val file = downloader.download(info) { progress ->
-                        downloadProgress = progress
-                    }
-                    isDownloading = false
+                    Toast.makeText(context, "Started download for ${searchRes.title}", Toast.LENGTH_SHORT).show()
+                    val file = downloader.download(searchRes)
                     if (file != null) {
                         Toast.makeText(context, "Downloaded ${file.name}", Toast.LENGTH_SHORT).show()
                         refreshLibrary()
@@ -390,13 +445,7 @@ fun LibraryScreen(
                     modifier = Modifier.combinedClickable(
                         onClick = {
                             scope.launch(Dispatchers.IO) {
-                                try {
-                                    val uri = Uri.parse(targetTrack.uri)
-                                    context.contentResolver.delete(uri, null, null)
-                                } catch (e: Exception) {
-                                    e.printStackTrace()
-                                }
-                                libraryRepository.scanLibrary()
+                                libraryRepository.deleteTrack(targetTrack)
                                 refreshLibrary()
                             }
                             trackForActionSheet = null

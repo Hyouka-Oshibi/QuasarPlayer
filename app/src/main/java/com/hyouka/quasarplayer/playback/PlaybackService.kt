@@ -1,16 +1,19 @@
 package com.hyouka.quasarplayer.playback
 
+import android.net.Uri
+import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
+import com.google.common.util.concurrent.Futures
+import com.google.common.util.concurrent.ListenableFuture
+import java.io.File
 
 /**
  * Owns the single ExoPlayer instance for the whole app and exposes it via
  * a MediaSession. This is what keeps audio playing when the app is
- * backgrounded and drives lock-screen / notification controls — the UI
- * (now-playing screen, mini-player) is just a thin client that connects
- * a MediaController to this session, it never talks to ExoPlayer directly.
+ * backgrounded and drives lock-screen / notification controls.
  */
 class PlaybackService : MediaSessionService() {
 
@@ -20,14 +23,44 @@ class PlaybackService : MediaSessionService() {
         super.onCreate()
 
         val player = ExoPlayer.Builder(this)
-            .setHandleAudioBecomingNoisy(true) // pause on headphone unplug
+            .setHandleAudioBecomingNoisy(true)
             .build()
 
-        // Repeat mode and shuffle are driven from Settings via the
-        // MediaController rather than hardcoded here.
         player.repeatMode = Player.REPEAT_MODE_OFF
 
-        mediaSession = MediaSession.Builder(this, player).build()
+        mediaSession = MediaSession.Builder(this, player)
+            .setCallback(MediaSessionCallback())
+            .build()
+    }
+
+    private inner class MediaSessionCallback : MediaSession.Callback {
+        override fun onAddMediaItems(
+            mediaSession: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            mediaItems: MutableList<MediaItem>
+        ): ListenableFuture<List<MediaItem>> {
+            val resolvedItems = mediaItems.map { item ->
+                if (item.localConfiguration != null) {
+                    item
+                } else {
+                    val uriString = item.requestMetadata.mediaUri?.toString() ?: item.mediaId
+                    val uri = parseUri(uriString)
+                    item.buildUpon()
+                        .setUri(uri)
+                        .build()
+                }
+            }
+            return Futures.immediateFuture(resolvedItems)
+        }
+    }
+
+    private fun parseUri(raw: String): Uri {
+        val trimmed = raw.trim()
+        return when {
+            trimmed.startsWith("content://") || trimmed.startsWith("file://") || trimmed.startsWith("http://") || trimmed.startsWith("https://") -> Uri.parse(trimmed)
+            trimmed.startsWith("/") -> Uri.fromFile(File(trimmed))
+            else -> Uri.parse(trimmed)
+        }
     }
 
     override fun onGetSession(
@@ -43,8 +76,6 @@ class PlaybackService : MediaSessionService() {
         super.onDestroy()
     }
 
-    // Stop the service once playback finishes and the app task is swiped
-    // away, rather than lingering as a silent foreground service.
     override fun onTaskRemoved(rootIntent: android.content.Intent?) {
         val player = mediaSession?.player ?: return
         if (!player.playWhenReady || player.mediaItemCount == 0) {

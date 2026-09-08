@@ -1,6 +1,7 @@
 package com.hyouka.quasarplayer.ui.library
 
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Pause
@@ -9,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.MediaItem
@@ -17,9 +19,9 @@ import androidx.media3.exoplayer.ExoPlayer
 import com.hyouka.quasarplayer.source.SearchResult
 import com.hyouka.quasarplayer.source.SourceExtractor
 import com.hyouka.quasarplayer.source.StreamInfo
+import com.hyouka.quasarplayer.ui.common.NetworkImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -28,10 +30,9 @@ fun PreviewSheet(
     searchResult: SearchResult,
     sourceExtractor: SourceExtractor,
     onDismiss: () -> Unit,
-    onDownloadRequested: (StreamInfo) -> Unit
+    onDownloadRequested: (SearchResult) -> Unit
 ) {
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
 
     var streamInfo by remember { mutableStateOf<StreamInfo?>(null) }
     var isLoadingStream by remember { mutableStateOf(true) }
@@ -106,27 +107,57 @@ fun PreviewSheet(
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            NetworkImage(
+                url = searchResult.thumbnailUrl,
+                modifier = Modifier
+                    .size(120.dp)
+                    .clip(RoundedCornerShape(12.dp)),
+                iconSize = 48.dp
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             Text(
                 text = searchResult.title,
                 style = MaterialTheme.typography.titleMedium,
                 maxLines = 2
             )
             Text(
-                text = searchResult.uploader ?: "Unknown Uploader",
+                text = searchResult.uploader ?: "Unknown Artist",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
 
             Spacer(modifier = Modifier.height(16.dp))
 
+            // Download Button (Available immediately!)
+            Button(
+                onClick = {
+                    onDownloadRequested(searchResult)
+                    onDismiss()
+                },
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(Icons.Default.Download, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Download to Library")
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
             if (isLoadingStream) {
-                CircularProgressIndicator()
-                Spacer(modifier = Modifier.height(8.dp))
-                Text("Resolving audio stream...", style = MaterialTheme.typography.bodySmall)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text("Resolving audio stream...", style = MaterialTheme.typography.bodySmall)
+                }
             } else if (streamInfo == null) {
                 Text(
-                    "Could not extract playable audio stream.",
-                    color = MaterialTheme.colorScheme.error
+                    "Could not extract playable audio preview stream.",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodySmall
                 )
             } else {
                 // Play / Pause & Seek
@@ -159,23 +190,6 @@ fun PreviewSheet(
                         valueRange = 0f..totalDur,
                         modifier = Modifier.weight(1f)
                     )
-                }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // Download Button
-                Button(
-                    onClick = {
-                        streamInfo?.let { info ->
-                            onDownloadRequested(info)
-                            onDismiss()
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Icon(Icons.Default.Download, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Download to Library")
                 }
             }
             Spacer(modifier = Modifier.height(24.dp))

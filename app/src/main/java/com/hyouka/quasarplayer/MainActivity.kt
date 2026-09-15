@@ -20,8 +20,11 @@ import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.ui.draw.clipToBounds
 import androidx.navigation.NavDestination.Companion.hierarchy
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
@@ -185,20 +188,22 @@ private fun AppScaffold(
         NavHost(
             navController = navController,
             startDestination = Destination.Library.route,
-            modifier = Modifier.padding(padding),
+            modifier = Modifier
+                .padding(padding)
+                .clipToBounds(),
             enterTransition = {
                 val initialIndex = destinations.indexOfFirst { it.route == initialState.destination.route }
                 val targetIndex = destinations.indexOfFirst { it.route == targetState.destination.route }
                 if (targetIndex > initialIndex) {
                     slideInHorizontally(
                         initialOffsetX = { fullWidth -> fullWidth },
-                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
-                    )
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    ) + fadeIn(animationSpec = tween(220))
                 } else {
                     slideInHorizontally(
                         initialOffsetX = { fullWidth -> -fullWidth },
-                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
-                    )
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    ) + fadeIn(animationSpec = tween(220))
                 }
             },
             exitTransition = {
@@ -207,13 +212,13 @@ private fun AppScaffold(
                 if (targetIndex > initialIndex) {
                     slideOutHorizontally(
                         targetOffsetX = { fullWidth -> -fullWidth },
-                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
-                    )
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    ) + fadeOut(animationSpec = tween(220))
                 } else {
                     slideOutHorizontally(
                         targetOffsetX = { fullWidth -> fullWidth },
-                        animationSpec = tween(durationMillis = 250, easing = FastOutSlowInEasing)
-                    )
+                        animationSpec = tween(durationMillis = 220, easing = FastOutSlowInEasing)
+                    ) + fadeOut(animationSpec = tween(220))
                 }
             }
         ) {

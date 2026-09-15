@@ -1,5 +1,6 @@
 package com.hyouka.quasarplayer.ui.playing
 
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -24,12 +25,23 @@ fun PlayingScreen(playerController: PlayerController) {
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // Header
-        Text(
-            text = "Now Playing",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
+        // Header (Displays playlist name on top if active)
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = "Now Playing",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (!state.activePlaylistName.isNullOrBlank()) {
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = "(${state.activePlaylistName})",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.basicMarquee()
+                )
+            }
+        }
 
         // Large Album Art Area
         TrackArt(
@@ -40,13 +52,14 @@ fun PlayingScreen(playerController: PlayerController) {
             iconSize = 96.dp
         )
 
-        // Track Info
+        // Track Info with Marquee Scrolling Title
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Text(
                 text = track?.title ?: "No Track Selected",
                 style = MaterialTheme.typography.headlineSmall,
                 color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1
+                maxLines = 1,
+                modifier = Modifier.basicMarquee()
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
@@ -69,9 +82,9 @@ fun PlayingScreen(playerController: PlayerController) {
 
             Slider(
                 value = displayPos.coerceIn(0f, totalDuration),
-                onValueChange = {
+                onValueChange = { pos ->
                     isUserSeeking = true
-                    sliderPosition = it
+                    sliderPosition = pos
                 },
                 onValueChangeFinished = {
                     playerController.seekTo(sliderPosition.toLong())
@@ -104,17 +117,17 @@ fun PlayingScreen(playerController: PlayerController) {
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Shuffle
+            // Shuffle Button
             IconButton(onClick = { playerController.toggleShuffle() }) {
                 Icon(
                     imageVector = Icons.Default.Shuffle,
                     contentDescription = "Shuffle",
                     tint = if (state.shuffleModeEnabled) MaterialTheme.colorScheme.primary
-                           else MaterialTheme.colorScheme.onSurfaceVariant
+                    else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
 
-            // Previous
+            // Skip Previous Button
             IconButton(onClick = { playerController.skipToPrevious() }) {
                 Icon(
                     imageVector = Icons.Default.SkipPrevious,
@@ -123,10 +136,11 @@ fun PlayingScreen(playerController: PlayerController) {
                 )
             }
 
-            // Play / Pause
-            FilledIconButton(
+            // Play / Pause Floating Action Button
+            FloatingActionButton(
                 onClick = { playerController.togglePlayPause() },
-                modifier = Modifier.size(64.dp)
+                containerColor = MaterialTheme.colorScheme.primaryContainer,
+                contentColor = MaterialTheme.colorScheme.onPrimaryContainer
             ) {
                 Icon(
                     imageVector = if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
@@ -135,7 +149,7 @@ fun PlayingScreen(playerController: PlayerController) {
                 )
             }
 
-            // Next
+            // Skip Next Button
             IconButton(onClick = { playerController.skipToNext() }) {
                 Icon(
                     imageVector = Icons.Default.SkipNext,
@@ -144,16 +158,16 @@ fun PlayingScreen(playerController: PlayerController) {
                 )
             }
 
-            // Repeat
+            // Repeat Button
             IconButton(onClick = { playerController.toggleRepeatMode() }) {
                 val (icon, tint) = when (state.repeatMode) {
-                    Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne to MaterialTheme.colorScheme.primary
-                    Player.REPEAT_MODE_ALL -> Icons.Default.Repeat to MaterialTheme.colorScheme.primary
-                    else -> Icons.Default.Repeat to MaterialTheme.colorScheme.onSurfaceVariant
+                    Player.REPEAT_MODE_ONE -> Pair(Icons.Default.RepeatOne, MaterialTheme.colorScheme.primary)
+                    Player.REPEAT_MODE_ALL -> Pair(Icons.Default.Repeat, MaterialTheme.colorScheme.primary)
+                    else -> Pair(Icons.Default.Repeat, MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Icon(
                     imageVector = icon,
-                    contentDescription = "Repeat Mode",
+                    contentDescription = "Repeat",
                     tint = tint
                 )
             }

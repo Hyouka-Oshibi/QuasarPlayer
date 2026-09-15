@@ -27,7 +27,8 @@ data class PlayerState(
     val durationMs: Long = 0L,
     val shuffleModeEnabled: Boolean = false,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
-    val queue: List<Track> = emptyList()
+    val queue: List<Track> = emptyList(),
+    val activePlaylistName: String? = null
 )
 
 class PlayerController(private val context: Context) {
@@ -42,6 +43,7 @@ class PlayerController(private val context: Context) {
 
     private var positionUpdateJob: Job? = null
     private var activeQueueTracks: List<Track> = emptyList()
+    private var activePlaylistName: String? = null
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
@@ -121,7 +123,8 @@ class PlayerController(private val context: Context) {
                 durationMs = controller.duration.coerceAtLeast(0L),
                 shuffleModeEnabled = controller.shuffleModeEnabled,
                 repeatMode = controller.repeatMode,
-                queue = activeQueueTracks
+                queue = activeQueueTracks,
+                activePlaylistName = activePlaylistName
             )
         }
     }
@@ -150,10 +153,11 @@ class PlayerController(private val context: Context) {
         positionUpdateJob = null
     }
 
-    fun playTrackList(tracks: List<Track>, startIndex: Int = 0) {
+    fun playTrackList(tracks: List<Track>, startIndex: Int = 0, playlistName: String? = null) {
         val controller = mediaController ?: return
         if (tracks.isEmpty()) return
         activeQueueTracks = tracks
+        activePlaylistName = playlistName
 
         val mediaItems = tracks.map { track ->
             val uri = parseUri(track.uri)

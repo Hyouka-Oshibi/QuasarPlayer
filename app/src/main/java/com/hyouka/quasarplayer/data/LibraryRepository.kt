@@ -20,7 +20,21 @@ class LibraryRepository(private val context: Context) {
 
     var savedSearchQuery: String = ""
     var savedSelectedSource: SourceType = SourceType.YOUTUBE
-    var savedSearchResults: List<SearchResult> = emptyList()
+
+    private val resultsCache = java.util.concurrent.ConcurrentHashMap<Pair<SourceType, String>, List<SearchResult>>()
+
+    fun getCachedResults(source: SourceType, query: String): List<SearchResult>? {
+        val trimmed = query.trim()
+        if (trimmed.isEmpty()) return emptyList()
+        return resultsCache[source to trimmed]
+    }
+
+    fun setCachedResults(source: SourceType, query: String, results: List<SearchResult>) {
+        val trimmed = query.trim()
+        if (trimmed.isNotEmpty()) {
+            resultsCache[source to trimmed] = results
+        }
+    }
 
     private val moshi = Moshi.Builder().addLast(KotlinJsonAdapterFactory()).build()
 
@@ -39,6 +53,7 @@ class LibraryRepository(private val context: Context) {
             MediaStore.Audio.Media.ARTIST,
             MediaStore.Audio.Media.DURATION,
             MediaStore.Audio.Media.DATE_MODIFIED,
+            MediaStore.Audio.Media.DATA,
             MediaStore.Audio.Media.RELATIVE_PATH
         )
 
@@ -59,15 +74,19 @@ class LibraryRepository(private val context: Context) {
                 val artistCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
                 val durationCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
                 val modifiedCol = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATE_MODIFIED)
+                val dataCol = cursor.getColumnIndex(MediaStore.Audio.Media.DATA)
 
                 while (cursor.moveToNext()) {
                     val mediaStoreId = cursor.getLong(idCol)
-                    val uri = ContentUris.withAppendedId(
+                    val contentUri = ContentUris.withAppendedId(
                         MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, mediaStoreId
                     ).toString()
 
-                    val trackId = stableId(uri)
-                    val cached = cachedIndex[trackId]
+                    val rawDataPath = if (dataCol != -1) cursor.getString(dataCol) else null
+                    val fileUri = if (!rawDataPath.isNullOrBlank()) Uri.fromFile(File(rawDataPath)).toString() else contentUri
+
+                    val trackId = generateStableId(rawDataPath ?: contentUri)
+                    val cached = cachedIndex[trackId] ?: cachedIndex.values.firstOrNull { it.id == trackId }
 
                     val mediaStoreTitle = cursor.getString(titleCol)
                     val mediaStoreArtist = cursor.getString(artistCol)
@@ -90,7 +109,7 @@ class LibraryRepository(private val context: Context) {
 
                     scannedTracksMap[trackId] = Track(
                         id = trackId,
-                        uri = uri,
+                        uri = fileUri,
                         title = finalTitle,
                         artist = finalArtist,
                         durationMs = finalDuration,
@@ -104,19 +123,24 @@ class LibraryRepository(private val context: Context) {
             e.printStackTrace()
         }
 
-        // 2. Direct Physical File Scan in Music/QuasarPlayer (to catch newly downloaded files immediately)
+        // 2. Direct Physical File Scan in Music/QuasarPlayer
         try {
             val musicDir = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MUSIC),
                 "QuasarPlayer"
             )
             if (musicDir.exists() && musicDir.isDirectory) {
-                val mp3Files = musicDir.listFiles { file -> file.isFile && file.extension.equals("mp3", ignoreCase = true) } ?: emptyArray()
-                for (file in mp3Files) {
-                    val fileUri = Uri.fromFile(file).toString()
-                    val trackId = stableId(fileUri)
+                val mediaFiles = musicDir.listFiles { file ->
+                    file.isFile && (file.extension.equals("mp3", ignoreCase = true) ||
+                            file.extension.equals("m4a", ignoreCase = true) ||
+                            file.extension.equals("webm", ignoreCase = true))
+                } ?: emptyArray()
 
-                    val cached = cachedIndex[trackId] ?: cachedIndex.values.firstOrNull { it.uri.endsWith(file.name) }
+                for (file in mediaFiles) {
+                    val fileUri = Uri.fromFile(file).toString()
+                    val trackId = generateStableId(file.absolutePath)
+
+                    val cached = cachedIndex[trackId]
 
                     if (!scannedTracksMap.containsKey(trackId)) {
                         scannedTracksMap[trackId] = Track(
@@ -129,6 +153,16 @@ class LibraryRepository(private val context: Context) {
                             artworkPath = cached?.artworkPath,
                             lastModified = file.lastModified()
                         )
+                    } else {
+                        // Merge cached artworkPath and duration onto MediaStore scanned track
+                        val existing = scannedTracksMap[trackId]!!
+                        scannedTracksMap[trackId] = existing.copy(
+                            title = cached?.title ?: existing.title,
+                            artist = cached?.artist ?: existing.artist,
+                            durationMs = if (existing.durationMs > 0) existing.durationMs else (cached?.durationMs ?: 0),
+                            artworkPath = existing.artworkPath ?: cached?.artworkPath,
+                            hasEmbeddedArt = existing.hasEmbeddedArt || (cached?.hasEmbeddedArt == true)
+                        )
                     }
                 }
             }
@@ -136,10 +170,13 @@ class LibraryRepository(private val context: Context) {
             e.printStackTrace()
         }
 
-        // Preserve any cached downloaded tracks that weren't caught in query
+        // Preserve any downloaded tracks in cached index that haven't been picked up
         for ((id, cachedTrack) in cachedIndex) {
             if (!scannedTracksMap.containsKey(id)) {
-                scannedTracksMap[id] = cachedTrack
+                val file = File(Uri.parse(cachedTrack.uri).path ?: cachedTrack.uri)
+                if (file.exists()) {
+                    scannedTracksMap[id] = cachedTrack
+                }
             }
         }
 
@@ -148,9 +185,15 @@ class LibraryRepository(private val context: Context) {
         resultList
     }
 
-    /** Stable ID from the content URI — survives filename changes. */
-    private fun stableId(uri: String): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(uri.toByteArray())
+    /** Generates a stable track ID based on normalized filename to prevent duplicate entries on rescan */
+    fun generateStableId(rawUriOrPath: String): String {
+        val path = try {
+            Uri.parse(rawUriOrPath).path ?: rawUriOrPath
+        } catch (e: Exception) {
+            rawUriOrPath
+        }
+        val filename = File(path).name.lowercase().trim()
+        val digest = MessageDigest.getInstance("SHA-256").digest(filename.toByteArray())
         return digest.joinToString("") { "%02x".format(it) }.take(12)
     }
 
@@ -218,9 +261,15 @@ class LibraryRepository(private val context: Context) {
         val current = loadCachedIndex().toMutableList()
         current.removeAll { it.id == track.id || it.uri == track.uri }
         saveIndex(current)
-    }
 
-    fun generateStableId(uri: String): String = stableId(uri)
+        // 6. Clean up track ID from all saved playlists
+        val playlists = listPlaylists()
+        for (playlist in playlists) {
+            if (playlist.trackIds.remove(track.id)) {
+                savePlaylist(playlist)
+            }
+        }
+    }
 
     fun loadCachedIndex(): List<Track> {
         if (!indexFile.exists()) return emptyList()

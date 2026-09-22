@@ -8,6 +8,8 @@ import android.net.Uri
 import android.os.Environment
 import com.hyouka.quasarplayer.data.LibraryRepository
 import com.hyouka.quasarplayer.data.Track
+import com.yausername.youtubedl_android.YoutubeDL
+import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -109,61 +111,116 @@ class Downloader(
             "QuasarPlayer"
         ).apply { mkdirs() }
 
+        var destFile = File(musicDir, "$sanitizedTitle.m4a")
+        var downloadSucceeded = false
+
         try {
-            // 1. Download Audio Stream
-            val request = Request.Builder()
-                .url(streamInfo.audioStreamUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-                .build()
-
-            val response = client.newCall(request).execute()
-            if (!response.isSuccessful || response.body == null) {
-                updateTaskStatus(taskId, DownloadStatus.FAILED, 0f)
-                return null
-            }
-
-            val contentType = response.header("Content-Type")?.lowercase() ?: ""
-            val ext = when {
-                contentType.contains("mpeg") || contentType.contains("mp3") -> ".mp3"
-                contentType.contains("webm") || contentType.contains("ogg") -> ".webm"
-                contentType.contains("mp4") || contentType.contains("m4a") || contentType.contains("aac") -> ".m4a"
-                streamInfo.audioStreamUrl.contains(".m4a") -> ".m4a"
-                streamInfo.audioStreamUrl.contains(".webm") -> ".webm"
-                else -> ".m4a"
-            }
-
-            val destFile = File(musicDir, "$sanitizedTitle$ext")
-
-            val body = response.body!!
-            val totalBytes = body.contentLength()
-            val inputStream = body.byteStream()
-            val outputStream = FileOutputStream(destFile)
-
-            val buffer = ByteArray(8192)
-            var bytesRead: Int
-            var downloadedBytes = 0L
-
-            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                outputStream.write(buffer, 0, bytesRead)
-                downloadedBytes += bytesRead
-                if (totalBytes > 0) {
-                    val progress = downloadedBytes.toFloat() / totalBytes.toFloat()
-                    updateTaskProgress(taskId, progress)
+            // 1. High-Speed Download using YoutubeDL Native Engine (Bypasses YouTube Bandwidth Throttling)
+            try {
+                val ytdlReq = YoutubeDLRequest(streamInfo.webpageUrl).apply {
+                    addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
+                    addOption("-o", destFile.absolutePath)
+                    addOption("--no-playlist")
+                    addOption("--no-warnings")
+                    addOption("--socket-timeout", "15")
+                    if (streamInfo.webpageUrl.contains("youtube.com") || streamInfo.webpageUrl.contains("youtu.be")) {
+                        addOption("--extractor-args", "youtube:player_client=android")
+                    }
                 }
+
+                YoutubeDL.getInstance().execute(ytdlReq) { progress, _, _ ->
+                    updateTaskProgress(taskId, (progress / 100f).coerceIn(0f, 1f))
+                }
+
+                // Check for resulting file (yt-dlp may auto-append actual container extension)
+                if (!destFile.exists()) {
+                    val candidateFiles = musicDir.listFiles { f ->
+                        f.isFile && f.nameWithoutExtension.equals(sanitizedTitle, ignoreCase = true)
+                    }
+                    if (!candidateFiles.isNullOrEmpty()) {
+                        destFile = candidateFiles.first()
+                    }
+                }
+
+                if (destFile.exists() && destFile.length() > 0) {
+                    downloadSucceeded = true
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
             }
 
-            outputStream.flush()
-            outputStream.close()
-            inputStream.close()
+            // Fallback to optimized OkHttp stream download if native YoutubeDL fails
+            if (!downloadSucceeded) {
+                val request = Request.Builder()
+                    .url(streamInfo.audioStreamUrl)
+                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+                    .header("Accept", "*/*")
+                    .header("Connection", "keep-alive")
+                    .build()
 
-            // 2. Fetch Thumbnail & Convert to JPEG Bytes + Save local artwork file
+                val response = client.newCall(request).execute()
+                if (!response.isSuccessful || response.body == null) {
+                    updateTaskStatus(taskId, DownloadStatus.FAILED, 0f)
+                    return null
+                }
+
+                val contentType = response.header("Content-Type")?.lowercase() ?: ""
+                val ext = when {
+                    contentType.contains("mpeg") || contentType.contains("mp3") -> ".mp3"
+                    contentType.contains("webm") || contentType.contains("ogg") -> ".webm"
+                    contentType.contains("mp4") || contentType.contains("m4a") || contentType.contains("aac") -> ".m4a"
+                    streamInfo.audioStreamUrl.contains(".m4a") -> ".m4a"
+                    streamInfo.audioStreamUrl.contains(".webm") -> ".webm"
+                    else -> ".m4a"
+                }
+
+                destFile = File(musicDir, "$sanitizedTitle$ext")
+
+                val body = response.body!!
+                val totalBytes = body.contentLength()
+                val inputStream = body.byteStream()
+                val outputStream = FileOutputStream(destFile)
+
+                val buffer = ByteArray(16384)
+                var bytesRead: Int
+                var downloadedBytes = 0L
+
+                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                    outputStream.write(buffer, 0, bytesRead)
+                    downloadedBytes += bytesRead
+                    if (totalBytes > 0) {
+                        val progress = downloadedBytes.toFloat() / totalBytes.toFloat()
+                        updateTaskProgress(taskId, progress)
+                    }
+                }
+
+                outputStream.flush()
+                outputStream.close()
+                inputStream.close()
+            }
+
+            // 2. Fetch Thumbnail & Convert to JPEG Bytes with Guaranteed Fallback Candidates
             var jpegBytes: ByteArray? = null
             var localArtworkFile: File? = null
 
-            if (!streamInfo.thumbnailUrl.isNullOrEmpty()) {
+            val candidateUrls = mutableListOf<String>()
+            if (!streamInfo.thumbnailUrl.isNullOrBlank()) {
+                candidateUrls.add(streamInfo.thumbnailUrl)
+            }
+
+            val ytMatch = Regex("(?:v=|\\/|shorts\\/)([A-Za-z0-9_-]{11})").find(streamInfo.webpageUrl)
+            if (ytMatch != null) {
+                val videoId = ytMatch.groupValues[1]
+                candidateUrls.add("https://i.ytimg.com/vi/$videoId/maxresdefault.jpg")
+                candidateUrls.add("https://i.ytimg.com/vi/$videoId/hqdefault.jpg")
+                candidateUrls.add("https://i.ytimg.com/vi/$videoId/sddefault.jpg")
+                candidateUrls.add("https://i.ytimg.com/vi/$videoId/mqdefault.jpg")
+            }
+
+            for (thumbUrl in candidateUrls.distinct()) {
                 try {
                     val imgReq = Request.Builder()
-                        .url(streamInfo.thumbnailUrl)
+                        .url(thumbUrl)
                         .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
                         .build()
 
@@ -176,22 +233,22 @@ class Downloader(
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, baos)
                             jpegBytes = baos.toByteArray()
 
-                            // Save local artwork file
                             val artFile = File(artworkDir, "${UUID.randomUUID()}.jpg")
                             val artFos = FileOutputStream(artFile)
                             artFos.write(jpegBytes)
                             artFos.flush()
                             artFos.close()
                             localArtworkFile = artFile
+                            break
                         }
                     }
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    // Try next candidate
                 }
             }
 
-            // 3. Embed ID3 Tags ONLY for MP3 files (do not corrupt M4A or WebM headers!)
-            if (ext == ".mp3") {
+            // 3. Embed ID3 Tags ONLY for MP3 files
+            if (destFile.extension.equals("mp3", ignoreCase = true)) {
                 Id3TagWriter.embedId3Tags(
                     mp3File = destFile,
                     title = streamInfo.title,
@@ -212,7 +269,7 @@ class Downloader(
 
             // 5. Instantly index the new track in LibraryRepository with full metadata
             val newTrack = Track(
-                id = libraryRepository.generateStableId(fileUri),
+                id = libraryRepository.generateStableId(destFile.absolutePath),
                 uri = fileUri,
                 title = streamInfo.title,
                 artist = streamInfo.uploader ?: "Unknown Artist",

@@ -162,7 +162,6 @@ class SourceExtractor(private val context: Context) {
                     val mapAdapter = moshi.adapter(Map::class.java)
                     val map = mapAdapter.fromJson(line) as? Map<*, *> ?: continue
 
-                    // Skip live streams
                     val isLive = map["is_live"] as? Boolean == true || map["was_live"] as? Boolean == true
                     if (isLive) continue
 
@@ -180,7 +179,10 @@ class SourceExtractor(private val context: Context) {
                     val durationMs = (durationSec * 1000).toLong()
 
                     val thumbnails = map["thumbnails"] as? List<*>
-                    val thumbnailUrl = (thumbnails?.lastOrNull() as? Map<*, *>)?.get("url")?.toString()
+                    val thumbnailUrl = (thumbnails?.filterIsInstance<Map<*, *>>()?.lastOrNull {
+                        val u = it["url"]?.toString() ?: ""
+                        !u.contains(".webp") && !u.contains(".avif")
+                    } ?: thumbnails?.lastOrNull() as? Map<*, *>)?.get("url")?.toString()
                         ?: map["thumbnail"]?.toString()
                         ?: if (source == SourceType.YOUTUBE) "https://i.ytimg.com/vi/$id/hqdefault.jpg" else null
 
@@ -246,7 +248,10 @@ class SourceExtractor(private val context: Context) {
             val durationMs = (durationSec * 1000).toLong()
 
             val thumbnails = map["thumbnails"] as? List<*>
-            val thumbnailUrl = (thumbnails?.lastOrNull() as? Map<*, *>)?.get("url")?.toString()
+            val thumbnailUrl = (thumbnails?.filterIsInstance<Map<*, *>>()?.lastOrNull {
+                val u = it["url"]?.toString() ?: ""
+                !u.contains(".webp") && !u.contains(".avif")
+            } ?: thumbnails?.lastOrNull() as? Map<*, *>)?.get("url")?.toString()
                 ?: map["thumbnail"]?.toString()
                 ?: if (source == SourceType.YOUTUBE) "https://i.ytimg.com/vi/$id/hqdefault.jpg" else null
 
@@ -270,6 +275,7 @@ class SourceExtractor(private val context: Context) {
         val request = YoutubeDLRequest(result.webpageUrl).apply {
             addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
             addOption("--get-url")
+            addOption("--dump-json")
             addOption("--no-warnings")
             addOption("--socket-timeout", "5")
             if (result.source == SourceType.YOUTUBE) {
@@ -279,13 +285,71 @@ class SourceExtractor(private val context: Context) {
 
         try {
             val response = YoutubeDL.getInstance().execute(request)
-            val streamUrl = response.out.lines().firstOrNull { it.isNotBlank() } ?: return@withContext null
+            val lines = response.out.lines().filter { it.isNotBlank() }
+            var streamUrl: String? = null
+            var fetchedTitle: String? = null
+            var fetchedArtist: String? = null
+            var fetchedDurationMs: Long = 0L
+            var fetchedThumbnailUrl: String? = null
+
+            for (line in lines) {
+                if (line.startsWith("http://") || line.startsWith("https://")) {
+                    streamUrl = line
+                } else if (line.startsWith("{")) {
+                    try {
+                        val mapAdapter = moshi.adapter(Map::class.java)
+                        val map = mapAdapter.fromJson(line) as? Map<*, *>
+                        if (map != null) {
+                            val id = map["id"]?.toString()
+                            val rawTitle = map["title"]?.toString()
+                            val rawChannel = map["channel"]?.toString()
+                                ?: map["uploader"]?.toString()
+                                ?: map["artist"]?.toString()
+                                ?: map["creator"]?.toString()
+
+                            if (!rawTitle.isNullOrBlank()) {
+                                fetchedTitle = MetadataCleaner.cleanTitle(rawTitle)
+                            }
+                            if (!rawChannel.isNullOrBlank()) {
+                                fetchedArtist = MetadataCleaner.cleanChannelName(rawChannel)
+                            }
+
+                            val durationSec = (map["duration"] as? Number)?.toDouble() ?: 0.0
+                            if (durationSec > 0) {
+                                fetchedDurationMs = (durationSec * 1000).toLong()
+                            }
+
+                            val thumbnails = map["thumbnails"] as? List<*>
+                            val thumb = (thumbnails?.filterIsInstance<Map<*, *>>()?.lastOrNull {
+                                val u = it["url"]?.toString() ?: ""
+                                !u.contains(".webp") && !u.contains(".avif")
+                            } ?: thumbnails?.lastOrNull() as? Map<*, *>)?.get("url")?.toString()
+                                ?: map["thumbnail"]?.toString()
+                                ?: if (!id.isNullOrBlank()) "https://i.ytimg.com/vi/$id/hqdefault.jpg" else null
+
+                            if (!thumb.isNullOrBlank()) {
+                                fetchedThumbnailUrl = thumb
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+            }
+
+            if (streamUrl.isNullOrEmpty()) return@withContext null
+
+            val finalTitle = fetchedTitle ?: if (result.title.startsWith("Direct Video")) "YouTube Track" else result.title
+            val finalArtist = fetchedArtist ?: if (result.uploader == "YouTube Direct Link") "Unknown Artist" else (result.uploader ?: "Unknown Artist")
+            val finalDuration = if (fetchedDurationMs > 0) fetchedDurationMs else result.durationMs
+            val finalThumbnail = fetchedThumbnailUrl ?: result.thumbnailUrl
+
             StreamInfo(
                 audioStreamUrl = streamUrl,
-                title = result.title,
-                uploader = result.uploader,
-                durationMs = result.durationMs,
-                thumbnailUrl = result.thumbnailUrl,
+                title = finalTitle,
+                uploader = finalArtist,
+                durationMs = finalDuration,
+                thumbnailUrl = finalThumbnail,
                 webpageUrl = result.webpageUrl
             )
         } catch (e: Exception) {

@@ -9,7 +9,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -65,8 +67,16 @@ fun LibraryScreen(
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
 
+    // Multi-Selection State
+    var isSelectionMode by remember { mutableStateOf(false) }
+    var selectedTrackIds by remember { mutableStateOf(setOf<String>()) }
+    var showBatchDeleteConfirmation by remember { mutableStateOf(false) }
+    var showBatchAddToPlaylistDialog by remember { mutableStateOf(false) }
+
+    // Dialog & Sheet States
     var trackForActionSheet by remember { mutableStateOf<Track?>(null) }
     var playlistForDetailSheet by remember { mutableStateOf<Playlist?>(null) }
+    var playlistToDelete by remember { mutableStateOf<Playlist?>(null) }
     var showRenameDialog by remember { mutableStateOf<Track?>(null) }
     var showAddToPlaylistDialog by remember { mutableStateOf<Track?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
@@ -116,6 +126,73 @@ fun LibraryScreen(
             .fillMaxSize()
             .padding(16.dp)
     ) {
+        // Multi-Select Action Bar (shown when tracks are selected)
+        if (isSelectionMode) {
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = RoundedCornerShape(12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = {
+                            isSelectionMode = false
+                            selectedTrackIds = emptySet()
+                        }) {
+                            Icon(Icons.Default.Close, contentDescription = "Exit Selection")
+                        }
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = "${selectedTrackIds.size} Selected",
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Select All / Deselect All
+                        IconButton(onClick = {
+                            if (selectedTrackIds.size == tracks.size) {
+                                selectedTrackIds = emptySet()
+                            } else {
+                                selectedTrackIds = tracks.map { it.id }.toSet()
+                            }
+                        }) {
+                            Icon(
+                                if (selectedTrackIds.size == tracks.size) Icons.Default.SelectAll else Icons.Default.DoneAll,
+                                contentDescription = "Select All"
+                            )
+                        }
+
+                        // Add Selected to Playlist
+                        IconButton(
+                            onClick = { showBatchAddToPlaylistDialog = true },
+                            enabled = selectedTrackIds.isNotEmpty()
+                        ) {
+                            Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = "Add Selected to Playlist")
+                        }
+
+                        // Delete Selected
+                        IconButton(
+                            onClick = { showBatchDeleteConfirmation = true },
+                            enabled = selectedTrackIds.isNotEmpty()
+                        ) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Delete Selected",
+                                tint = if (selectedTrackIds.isNotEmpty()) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Search Bar (Persistent search term across tabs)
         OutlinedTextField(
             value = searchQuery,
@@ -156,7 +233,7 @@ fun LibraryScreen(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // Source Chips and Search Button with Auto-Search & Independent RAM Caching
+        // Source Chips and Search Button
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -369,6 +446,8 @@ fun LibraryScreen(
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
                         itemsIndexed(tracks) { index, track ->
+                            val isSelected = selectedTrackIds.contains(track.id)
+
                             ListItem(
                                 headlineContent = {
                                     Text(
@@ -384,18 +463,43 @@ fun LibraryScreen(
                                     )
                                 },
                                 leadingContent = {
-                                    TrackArt(
-                                        track = track,
-                                        modifier = Modifier.size(48.dp),
-                                        iconSize = 24.dp
-                                    )
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        if (isSelectionMode) {
+                                            Checkbox(
+                                                checked = isSelected,
+                                                onCheckedChange = { checked ->
+                                                    selectedTrackIds = if (checked) {
+                                                        selectedTrackIds + track.id
+                                                    } else {
+                                                        selectedTrackIds - track.id
+                                                    }
+                                                }
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                        }
+                                        TrackArt(
+                                            track = track,
+                                            modifier = Modifier.size(48.dp),
+                                            iconSize = 24.dp
+                                        )
+                                    }
                                 },
                                 modifier = Modifier.combinedClickable(
                                     onClick = {
-                                        playerController.playTrackList(tracks, index)
+                                        if (isSelectionMode) {
+                                            selectedTrackIds = if (isSelected) {
+                                                selectedTrackIds - track.id
+                                            } else {
+                                                selectedTrackIds + track.id
+                                            }
+                                        } else {
+                                            playerController.playTrackList(tracks, index)
+                                        }
                                     },
                                     onLongClick = {
-                                        trackForActionSheet = track
+                                        if (!isSelectionMode) {
+                                            trackForActionSheet = track
+                                        }
                                     }
                                 )
                             )
@@ -425,17 +529,24 @@ fun LibraryScreen(
                     } else {
                         LazyColumn(modifier = Modifier.fillMaxSize()) {
                             items(playlists) { playlist ->
-                                val validTrackCount = tracks.count { playlist.trackIds.contains(it.id) }
+                                val playlistTracks = tracks.filter { playlist.trackIds.contains(it.id) }
+                                val totalDurationMs = playlistTracks.sumOf { it.durationMs }
+                                val durationText = formatPlaylistDuration(totalDurationMs)
+                                val subtitleText = if (playlistTracks.isEmpty()) "0 tracks" else "${playlistTracks.size} tracks • $durationText"
+
                                 ListItem(
                                     headlineContent = { Text(playlist.name) },
-                                    supportingContent = { Text("$validTrackCount tracks") },
+                                    supportingContent = { Text(subtitleText) },
                                     leadingContent = { Icon(Icons.Default.QueueMusic, contentDescription = null) },
                                     trailingContent = {
                                         IconButton(onClick = {
-                                            libraryRepository.deletePlaylist(playlist.name)
-                                            refreshLibrary()
+                                            playlistToDelete = playlist
                                         }) {
-                                            Icon(Icons.Default.Delete, contentDescription = "Delete Playlist")
+                                            Icon(
+                                                Icons.Default.Delete,
+                                                contentDescription = "Delete Playlist",
+                                                tint = MaterialTheme.colorScheme.error
+                                            )
                                         }
                                     },
                                     modifier = Modifier.combinedClickable(
@@ -456,6 +567,9 @@ fun LibraryScreen(
     // Playlist Detail & Editing Bottom Sheet
     playlistForDetailSheet?.let { activePlaylist ->
         val playlistTracks = tracks.filter { activePlaylist.trackIds.contains(it.id) }
+        val totalDurationMs = playlistTracks.sumOf { it.durationMs }
+        val durationText = formatPlaylistDuration(totalDurationMs)
+        val subtitleText = if (playlistTracks.isEmpty()) "0 tracks" else "${playlistTracks.size} tracks • $durationText"
 
         ModalBottomSheet(onDismissRequest = { playlistForDetailSheet = null }) {
             Column(
@@ -475,7 +589,7 @@ fun LibraryScreen(
                             modifier = Modifier.basicMarquee()
                         )
                         Text(
-                            text = "${playlistTracks.size} tracks",
+                            text = subtitleText,
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -566,27 +680,7 @@ fun LibraryScreen(
         }
     }
 
-    // Preview Sheet
-    previewResult?.let { result ->
-        PreviewSheet(
-            searchResult = result,
-            sourceExtractor = sourceExtractor,
-            onDismiss = { previewResult = null },
-            onDownloadRequested = { searchRes ->
-                scope.launch {
-                    Toast.makeText(context, "Started download for ${searchRes.title}", Toast.LENGTH_SHORT).show()
-                    val file = downloader.download(searchRes)
-                    if (file != null) {
-                        refreshLibrary()
-                    } else {
-                        Toast.makeText(context, "Download failed", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        )
-    }
-
-    // Track Long-Press Action Sheet
+    // Single Track Long-Press Action Sheet
     trackForActionSheet?.let { targetTrack ->
         ModalBottomSheet(onDismissRequest = { trackForActionSheet = null }) {
             Column(
@@ -601,7 +695,20 @@ fun LibraryScreen(
                 )
                 Spacer(modifier = Modifier.height(16.dp))
 
-                // Rename
+                // Enter Multi-Select Mode
+                ListItem(
+                    headlineContent = { Text("Select / Multi-Select") },
+                    leadingContent = { Icon(Icons.Default.CheckBox, contentDescription = null) },
+                    modifier = Modifier.combinedClickable(
+                        onClick = {
+                            isSelectionMode = true
+                            selectedTrackIds = setOf(targetTrack.id)
+                            trackForActionSheet = null
+                        }
+                    )
+                )
+
+                // Rename Track
                 ListItem(
                     headlineContent = { Text("Rename Track") },
                     leadingContent = { Icon(Icons.Default.Edit, contentDescription = null) },
@@ -616,7 +723,7 @@ fun LibraryScreen(
                 // Add to Playlist
                 ListItem(
                     headlineContent = { Text("Add to Playlist") },
-                    leadingContent = { Icon(Icons.Default.PlaylistAdd, contentDescription = null) },
+                    leadingContent = { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = null) },
                     modifier = Modifier.combinedClickable(
                         onClick = {
                             showAddToPlaylistDialog = targetTrack
@@ -649,6 +756,107 @@ fun LibraryScreen(
                 )
             }
         }
+    }
+
+    // Playlist Deletion Confirmation Dialog
+    playlistToDelete?.let { targetPlaylist ->
+        val pCount = tracks.count { targetPlaylist.trackIds.contains(it.id) }
+        AlertDialog(
+            onDismissRequest = { playlistToDelete = null },
+            title = { Text("Delete Playlist '${targetPlaylist.name}'?") },
+            text = { Text("Are you sure you want to delete this playlist with $pCount tracks? (Your audio files will not be deleted)") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        libraryRepository.deletePlaylist(targetPlaylist.name)
+                        refreshLibrary()
+                        playlistToDelete = null
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { playlistToDelete = null }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Batch Track Deletion Confirmation Dialog
+    if (showBatchDeleteConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showBatchDeleteConfirmation = false },
+            title = { Text("Delete ${selectedTrackIds.size} Tracks?") },
+            text = { Text("Are you sure you want to permanently delete ${selectedTrackIds.size} tracks from storage?") },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val tracksToDelete = tracks.filter { selectedTrackIds.contains(it.id) }
+                        scope.launch(Dispatchers.IO) {
+                            tracksToDelete.forEach { libraryRepository.deleteTrack(it) }
+                            withContext(Dispatchers.Main) {
+                                isSelectionMode = false
+                                selectedTrackIds = emptySet()
+                                refreshLibrary()
+                            }
+                        }
+                        showBatchDeleteConfirmation = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Delete")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showBatchDeleteConfirmation = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
+    }
+
+    // Batch Add to Playlist Dialog
+    if (showBatchAddToPlaylistDialog) {
+        AlertDialog(
+            onDismissRequest = { showBatchAddToPlaylistDialog = false },
+            title = { Text("Add ${selectedTrackIds.size} Tracks to Playlist") },
+            text = {
+                if (playlists.isEmpty()) {
+                    Text("No playlists created yet. Create one first.")
+                } else {
+                    Column {
+                        playlists.forEach { playlist ->
+                            TextButton(
+                                onClick = {
+                                    val newTrackIds = selectedTrackIds.filterNot { playlist.trackIds.contains(it) }
+                                    if (newTrackIds.isNotEmpty()) {
+                                        playlist.trackIds.addAll(newTrackIds)
+                                        libraryRepository.savePlaylist(playlist)
+                                        Toast.makeText(context, "Added ${newTrackIds.size} tracks to ${playlist.name}", Toast.LENGTH_SHORT).show()
+                                        refreshLibrary()
+                                    }
+                                    showBatchAddToPlaylistDialog = false
+                                    isSelectionMode = false
+                                    selectedTrackIds = emptySet()
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(playlist.name)
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showBatchAddToPlaylistDialog = false }) {
+                    Text("Cancel")
+                }
+            }
+        )
     }
 
     // Create Playlist Dialog
@@ -688,7 +896,7 @@ fun LibraryScreen(
         )
     }
 
-    // Add to Playlist Dialog
+    // Add Single Track to Playlist Dialog
     showAddToPlaylistDialog?.let { targetTrack ->
         AlertDialog(
             onDismissRequest = { showAddToPlaylistDialog = null },
@@ -774,4 +982,18 @@ private fun formatMs(ms: Long): String {
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     return "%d:%02d".format(minutes, seconds)
+}
+
+private fun formatPlaylistDuration(totalMs: Long): String {
+    if (totalMs <= 0) return "0:00"
+    val totalSeconds = totalMs / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+
+    return when {
+        hours > 0 -> "%d hr %d min".format(hours, minutes)
+        minutes > 0 -> "%d:%02d".format(minutes, seconds)
+        else -> "%d sec".format(seconds)
+    }
 }

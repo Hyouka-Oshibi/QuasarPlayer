@@ -13,11 +13,13 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.core.content.ContextCompat
+import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -37,21 +39,24 @@ import com.hyouka.quasarplayer.source.Downloader
 import com.hyouka.quasarplayer.source.SourceExtractor
 import com.hyouka.quasarplayer.ui.library.LibraryScreen
 import com.hyouka.quasarplayer.ui.playing.PlayingScreen
+import com.hyouka.quasarplayer.ui.search.SearchScreen
 import com.hyouka.quasarplayer.ui.settings.AppTheme
 import com.hyouka.quasarplayer.ui.settings.SettingsRepository
 import com.hyouka.quasarplayer.ui.settings.SettingsScreen
 import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.firstOrNull
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 sealed class Destination(val route: String, val label: String) {
     data object Library : Destination("library", "Library")
+    data object Search : Destination("search", "Search")
     data object Playing : Destination("playing", "Playing")
     data object Settings : Destination("settings", "Settings")
 }
 
-private val destinations = listOf(Destination.Library, Destination.Playing, Destination.Settings)
+private val destinations = listOf(Destination.Library, Destination.Search, Destination.Playing, Destination.Settings)
 
 class MainActivity : ComponentActivity() {
 
@@ -62,6 +67,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var downloader: Downloader
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val splashScreen = installSplashScreen()
+        var keepSplash = true
+        splashScreen.setKeepOnScreenCondition { keepSplash }
         super.onCreate(savedInstanceState)
 
         libraryRepository = LibraryRepository(applicationContext)
@@ -71,8 +79,15 @@ class MainActivity : ComponentActivity() {
         downloader = Downloader(applicationContext, libraryRepository, sourceExtractor)
 
         setContent {
-            val themeState by settingsRepository.themeFlow.collectAsState(initial = AppTheme.SYSTEM)
-            val darkTheme = when (themeState) {
+            val themeState by settingsRepository.themeFlow.collectAsState(initial = null)
+            
+            LaunchedEffect(themeState) {
+                if (themeState != null) {
+                    keepSplash = false
+                }
+            }
+            
+            val darkTheme = when (themeState ?: AppTheme.SYSTEM) {
                 AppTheme.LIGHT -> false
                 AppTheme.DARK -> true
                 AppTheme.SYSTEM -> isSystemInDarkTheme()
@@ -154,6 +169,7 @@ private fun AppScaffold(
     downloader: Downloader
 ) {
     val navController = rememberNavController()
+    val coroutineScope = rememberCoroutineScope()
 
     Scaffold(
         bottomBar = {
@@ -164,6 +180,7 @@ private fun AppScaffold(
                 destinations.forEach { dest ->
                     val icon = when (dest) {
                         Destination.Library -> Icons.Filled.Folder
+                        Destination.Search -> Icons.Filled.Search
                         Destination.Playing -> Icons.Filled.PlayArrow
                         Destination.Settings -> Icons.Filled.Settings
                     }
@@ -225,9 +242,15 @@ private fun AppScaffold(
             composable(Destination.Library.route) {
                 LibraryScreen(
                     libraryRepository = libraryRepository,
-                    playerController = playerController,
+                    playerController = playerController
+                )
+            }
+            composable(Destination.Search.route) {
+                SearchScreen(
+                    libraryRepository = libraryRepository,
                     sourceExtractor = sourceExtractor,
-                    downloader = downloader
+                    downloader = downloader,
+                    onLibraryUpdated = { coroutineScope.launch { libraryRepository.scanLibrary() } }
                 )
             }
             composable(Destination.Playing.route) {
@@ -236,7 +259,15 @@ private fun AppScaffold(
             composable(Destination.Settings.route) {
                 SettingsScreen(
                     settingsRepository = settingsRepository,
-                    onRescanLibrary = { libraryRepository.scanLibrary() }
+                    onRescanLibrary = { coroutineScope.launch { libraryRepository.scanLibrary() } },
+                    onCheckIntegrity = { 
+                        var brokenCount = 0
+                        withContext(Dispatchers.IO) {
+                            brokenCount = libraryRepository.checkIntegrity()
+                            libraryRepository.scanLibrary()
+                        }
+                        brokenCount
+                    }
                 )
             }
         }

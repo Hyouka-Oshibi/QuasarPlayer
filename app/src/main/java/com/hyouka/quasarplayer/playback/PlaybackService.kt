@@ -8,6 +8,12 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.hyouka.quasarplayer.ui.settings.SettingsRepository
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 /**
@@ -22,15 +28,28 @@ class PlaybackService : MediaSessionService() {
     override fun onCreate() {
         super.onCreate()
 
+        val dataSourceFactory = androidx.media3.datasource.DefaultDataSource.Factory(this)
+        val mediaSourceFactory = androidx.media3.exoplayer.source.DefaultMediaSourceFactory(this)
+            .setDataSourceFactory(dataSourceFactory)
+
         val player = ExoPlayer.Builder(this)
+            .setMediaSourceFactory(mediaSourceFactory)
             .setHandleAudioBecomingNoisy(true)
             .build()
-
-        player.repeatMode = Player.REPEAT_MODE_OFF
 
         mediaSession = MediaSession.Builder(this, player)
             .setCallback(MediaSessionCallback())
             .build()
+
+        CoroutineScope(Dispatchers.IO).launch {
+            val settingsRepo = SettingsRepository(this@PlaybackService)
+            val loop = settingsRepo.loopDefaultFlow.first()
+            val shuffle = settingsRepo.shuffleDefaultFlow.first()
+            withContext(Dispatchers.Main) {
+                player.repeatMode = loop
+                player.shuffleModeEnabled = shuffle
+            }
+        }
     }
 
     private inner class MediaSessionCallback : MediaSession.Callback {

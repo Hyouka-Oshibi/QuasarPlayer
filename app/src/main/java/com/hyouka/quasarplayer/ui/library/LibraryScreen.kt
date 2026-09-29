@@ -1,9 +1,10 @@
 package com.hyouka.quasarplayer.ui.library
 
-import android.net.Uri
 import android.widget.Toast
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -12,6 +13,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistAdd
+import androidx.compose.material.icons.automirrored.filled.Sort
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -19,12 +21,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.ui.draw.shadow
+import org.burnoutcrew.reorderable.*
 import com.hyouka.quasarplayer.data.LibraryRepository
 import com.hyouka.quasarplayer.data.Playlist
 import com.hyouka.quasarplayer.data.Track
 import com.hyouka.quasarplayer.playback.PlayerController
-import com.hyouka.quasarplayer.source.*
-import com.hyouka.quasarplayer.ui.common.NetworkImage
 import com.hyouka.quasarplayer.ui.common.TrackArt
 import com.squareup.moshi.Moshi
 import com.squareup.moshi.Types
@@ -38,34 +41,40 @@ enum class LibraryTab {
     TRACKS, PLAYLISTS
 }
 
+enum class SortMode {
+    NAME, DATE_ADDED
+}
+
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun LibraryScreen(
     libraryRepository: LibraryRepository,
-    playerController: PlayerController,
-    sourceExtractor: SourceExtractor,
-    downloader: Downloader
+    playerController: PlayerController
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var searchQuery by remember { mutableStateOf(libraryRepository.savedSearchQuery) }
-    var selectedSource by remember { mutableStateOf(libraryRepository.savedSelectedSource) }
-
-    var searchResults by remember {
-        mutableStateOf<List<SearchResult>>(
-            libraryRepository.getCachedResults(selectedSource, searchQuery) ?: emptyList()
-        )
+    var sortMode by remember { 
+        mutableStateOf(
+            try { 
+                SortMode.valueOf(libraryRepository.savedSortMode) 
+            } catch (e: Exception) { 
+                SortMode.DATE_ADDED 
+            }
+        ) 
     }
-
-    var isSearching by remember { mutableStateOf(false) }
-    var previewResult by remember { mutableStateOf<SearchResult?>(null) }
-
-    val activeDownloads by downloader.activeDownloads.collectAsState()
 
     var selectedTab by remember { mutableStateOf(LibraryTab.TRACKS) }
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
+
+    // Sync search query changes from other screens
+    LaunchedEffect(libraryRepository.savedSearchQuery) {
+        if (searchQuery != libraryRepository.savedSearchQuery) {
+            searchQuery = libraryRepository.savedSearchQuery
+        }
+    }
 
     // Multi-Selection State
     var isSelectionMode by remember { mutableStateOf(false) }
@@ -80,29 +89,6 @@ fun LibraryScreen(
     var showRenameDialog by remember { mutableStateOf<Track?>(null) }
     var showAddToPlaylistDialog by remember { mutableStateOf<Track?>(null) }
     var showCreatePlaylistDialog by remember { mutableStateOf(false) }
-
-    val performSearch: (String, SourceType) -> Unit = { queryToSearch, sourceToSearch ->
-        val trimmed = queryToSearch.trim()
-        if (trimmed.isNotBlank()) {
-            scope.launch {
-                isSearching = true
-                val cached = libraryRepository.getCachedResults(sourceToSearch, trimmed)
-                if (cached != null) {
-                    if (selectedSource == sourceToSearch && searchQuery.trim() == trimmed) {
-                        searchResults = cached
-                    }
-                    isSearching = false
-                } else {
-                    val res = sourceExtractor.search(trimmed, sourceToSearch)
-                    libraryRepository.setCachedResults(sourceToSearch, trimmed, res)
-                    if (selectedSource == sourceToSearch && searchQuery.trim() == trimmed) {
-                        searchResults = res
-                    }
-                    isSearching = false
-                }
-            }
-        }
-    }
 
     val refreshLibrary: () -> Unit = {
         scope.launch(Dispatchers.IO) {
@@ -119,6 +105,17 @@ fun LibraryScreen(
 
     LaunchedEffect(Unit) {
         refreshLibrary()
+    }
+
+    val filteredAndSortedTracks = remember(tracks, searchQuery, sortMode) {
+        val filtered = if (searchQuery.isBlank()) tracks else tracks.filter {
+            it.title.contains(searchQuery, ignoreCase = true) ||
+            (it.artist?.contains(searchQuery, ignoreCase = true) == true)
+        }
+        when (sortMode) {
+            SortMode.DATE_ADDED -> filtered.sortedByDescending { it.lastModified }
+            SortMode.NAME -> filtered.sortedBy { it.title.lowercase() }
+        }
     }
 
     Column(
@@ -157,14 +154,14 @@ fun LibraryScreen(
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         // Select All / Deselect All
                         IconButton(onClick = {
-                            if (selectedTrackIds.size == tracks.size) {
+                            if (selectedTrackIds.size == filteredAndSortedTracks.size) {
                                 selectedTrackIds = emptySet()
                             } else {
-                                selectedTrackIds = tracks.map { it.id }.toSet()
+                                selectedTrackIds = filteredAndSortedTracks.map { it.id }.toSet()
                             }
                         }) {
                             Icon(
-                                if (selectedTrackIds.size == tracks.size) Icons.Default.SelectAll else Icons.Default.DoneAll,
+                                if (selectedTrackIds.size == filteredAndSortedTracks.size) Icons.Default.SelectAll else Icons.Default.DoneAll,
                                 contentDescription = "Select All"
                             )
                         }
@@ -199,29 +196,14 @@ fun LibraryScreen(
             onValueChange = { newQuery ->
                 searchQuery = newQuery
                 libraryRepository.savedSearchQuery = newQuery
-
-                val instantDirectResult = sourceExtractor.parseDirectUrlInstant(newQuery)
-                if (instantDirectResult != null) {
-                    val instantList = listOf(instantDirectResult)
-                    searchResults = instantList
-                    libraryRepository.setCachedResults(selectedSource, newQuery, instantList)
-                } else {
-                    val cached = libraryRepository.getCachedResults(selectedSource, newQuery)
-                    if (cached != null) {
-                        searchResults = cached
-                    } else if (newQuery.isBlank()) {
-                        searchResults = emptyList()
-                    }
-                }
             },
             modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("Search or link") },
+            placeholder = { Text("Search") },
             leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
             trailingIcon = {
                 if (searchQuery.isNotEmpty()) {
                     IconButton(onClick = {
                         searchQuery = ""
-                        searchResults = emptyList()
                         libraryRepository.savedSearchQuery = ""
                     }) {
                         Icon(Icons.Default.Clear, contentDescription = "Clear")
@@ -231,188 +213,6 @@ fun LibraryScreen(
             singleLine = true
         )
 
-        Spacer(modifier = Modifier.height(8.dp))
-
-        // Source Chips and Search Button
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(
-                    selected = selectedSource == SourceType.YOUTUBE,
-                    onClick = {
-                        if (selectedSource != SourceType.YOUTUBE) {
-                            selectedSource = SourceType.YOUTUBE
-                            libraryRepository.savedSelectedSource = SourceType.YOUTUBE
-
-                            val cached = libraryRepository.getCachedResults(SourceType.YOUTUBE, searchQuery)
-                            if (cached != null) {
-                                searchResults = cached
-                            } else if (searchQuery.isNotBlank()) {
-                                searchResults = emptyList()
-                                performSearch(searchQuery, SourceType.YOUTUBE)
-                            }
-                        }
-                    },
-                    label = { Text("YouTube") }
-                )
-                FilterChip(
-                    selected = selectedSource == SourceType.SOUNDCLOUD,
-                    onClick = {
-                        if (selectedSource != SourceType.SOUNDCLOUD) {
-                            selectedSource = SourceType.SOUNDCLOUD
-                            libraryRepository.savedSelectedSource = SourceType.SOUNDCLOUD
-
-                            val cached = libraryRepository.getCachedResults(SourceType.SOUNDCLOUD, searchQuery)
-                            if (cached != null) {
-                                searchResults = cached
-                            } else if (searchQuery.isNotBlank()) {
-                                searchResults = emptyList()
-                                performSearch(searchQuery, SourceType.SOUNDCLOUD)
-                            }
-                        }
-                    },
-                    label = { Text("SoundCloud") }
-                )
-            }
-
-            // Search button matching FilterChip styling
-            FilterChip(
-                selected = isSearching,
-                onClick = {
-                    if (searchQuery.isNotBlank() && !isSearching) {
-                        performSearch(searchQuery, selectedSource)
-                    }
-                },
-                enabled = searchQuery.isNotBlank(),
-                label = {
-                    if (isSearching) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(14.dp),
-                            strokeWidth = 2.dp
-                        )
-                    } else {
-                        Text("Search")
-                    }
-                },
-                leadingIcon = {
-                    if (!isSearching) {
-                        Icon(Icons.Default.Search, contentDescription = null, modifier = Modifier.size(16.dp))
-                    }
-                }
-            )
-        }
-
-        // Search Results Dropdown List
-        if (searchResults.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 260.dp),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
-            ) {
-                LazyColumn(modifier = Modifier.fillMaxWidth()) {
-                    items(searchResults) { result ->
-                        ListItem(
-                            headlineContent = {
-                                Text(
-                                    text = result.title,
-                                    maxLines = 1,
-                                    modifier = Modifier.basicMarquee()
-                                )
-                            },
-                            supportingContent = {
-                                Text(
-                                    "${result.uploader ?: "Unknown"} • ${formatMs(result.durationMs)}",
-                                    maxLines = 1
-                                )
-                            },
-                            leadingContent = {
-                                NetworkImage(
-                                    url = result.thumbnailUrl,
-                                    modifier = Modifier.size(48.dp),
-                                    iconSize = 24.dp
-                                )
-                            },
-                            trailingContent = {
-                                IconButton(
-                                    onClick = {
-                                        scope.launch {
-                                            Toast.makeText(context, "Downloading ${result.title}", Toast.LENGTH_SHORT).show()
-                                            val file = downloader.download(result)
-                                            if (file != null) {
-                                                refreshLibrary()
-                                            }
-                                        }
-                                    }
-                                ) {
-                                    Icon(Icons.Default.Download, contentDescription = "Download Immediately")
-                                }
-                            },
-                            modifier = Modifier.combinedClickable(
-                                onClick = { previewResult = result }
-                            )
-                        )
-                        HorizontalDivider()
-                    }
-                }
-            }
-        }
-
-        // Active Downloads Card List
-        if (activeDownloads.isNotEmpty()) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
-            ) {
-                Column(modifier = Modifier.padding(12.dp)) {
-                    Text(
-                        text = "Active Downloads (${activeDownloads.size})",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.height(6.dp))
-                    activeDownloads.forEach { task ->
-                        Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = task.title,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 1,
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .basicMarquee()
-                                )
-                                Text(
-                                    text = when (task.status) {
-                                        DownloadStatus.DOWNLOADING -> "${(task.progress * 100).toInt()}%"
-                                        DownloadStatus.COMPLETED -> "Done"
-                                        DownloadStatus.FAILED -> "Failed"
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = if (task.status == DownloadStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
-                                )
-                            }
-                            Spacer(modifier = Modifier.height(2.dp))
-                            if (task.status == DownloadStatus.DOWNLOADING) {
-                                LinearProgressIndicator(
-                                    progress = { task.progress },
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         Spacer(modifier = Modifier.height(16.dp))
 
         // Segmented Control Tabs
@@ -420,7 +220,7 @@ fun LibraryScreen(
             Tab(
                 selected = selectedTab == LibraryTab.TRACKS,
                 onClick = { selectedTab = LibraryTab.TRACKS },
-                text = { Text("Tracks (${tracks.size})") }
+                text = { Text("Tracks (${filteredAndSortedTracks.size})") }
             )
             Tab(
                 selected = selectedTab == LibraryTab.PLAYLISTS,
@@ -429,23 +229,34 @@ fun LibraryScreen(
             )
         }
 
-        Text(
-            text = "Tap a track to play, hold for details",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(vertical = 6.dp)
-        )
-
         // Tab Content
         when (selectedTab) {
             LibraryTab.TRACKS -> {
-                if (tracks.isEmpty()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = {
+                            sortMode = if (sortMode == SortMode.DATE_ADDED) SortMode.NAME else SortMode.DATE_ADDED
+                            libraryRepository.savedSortMode = sortMode.name
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.Sort, contentDescription = "Sort")
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Sort by: " + if (sortMode == SortMode.DATE_ADDED) "Date Added" else "Name")
+                    }
+                }
+
+                if (filteredAndSortedTracks.isEmpty()) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Text("No tracks found in Music/QuasarPlayer")
+                        Text(if (searchQuery.isBlank()) "No tracks found in Music/QuasarPlayer" else "No matching tracks")
                     }
                 } else {
                     LazyColumn(modifier = Modifier.fillMaxSize()) {
-                        itemsIndexed(tracks) { index, track ->
+                        itemsIndexed(filteredAndSortedTracks) { index, track ->
                             val isSelected = selectedTrackIds.contains(track.id)
 
                             ListItem(
@@ -493,7 +304,7 @@ fun LibraryScreen(
                                                 selectedTrackIds + track.id
                                             }
                                         } else {
-                                            playerController.playTrackList(tracks, index)
+                                            playerController.playTrackList(filteredAndSortedTracks, index)
                                         }
                                     },
                                     onLongClick = {
@@ -566,19 +377,37 @@ fun LibraryScreen(
 
     // Playlist Detail & Editing Bottom Sheet
     playlistForDetailSheet?.let { activePlaylist ->
-        val playlistTracks = tracks.filter { activePlaylist.trackIds.contains(it.id) }
+        var playlistTracks by remember(activePlaylist.trackIds, tracks) {
+            mutableStateOf(activePlaylist.trackIds.mapNotNull { id -> tracks.find { it.id == id } })
+        }
         val totalDurationMs = playlistTracks.sumOf { it.durationMs }
         val durationText = formatPlaylistDuration(totalDurationMs)
         val subtitleText = if (playlistTracks.isEmpty()) "0 tracks" else "${playlistTracks.size} tracks • $durationText"
 
-        ModalBottomSheet(onDismissRequest = { playlistForDetailSheet = null }) {
+        val reorderState = rememberReorderableLazyListState(onMove = { from, to ->
+            playlistTracks = playlistTracks.toMutableList().apply {
+                add(to.index, removeAt(from.index))
+            }
+        })
+
+        val saveAndDismiss = {
+            activePlaylist.trackIds.clear()
+            activePlaylist.trackIds.addAll(playlistTracks.map { it.id })
+            libraryRepository.savePlaylist(activePlaylist)
+            refreshLibrary()
+            playlistForDetailSheet = null
+        }
+
+        ModalBottomSheet(
+            onDismissRequest = { saveAndDismiss() },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            modifier = Modifier.fillMaxHeight()
+        ) {
             Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(24.dp)
+                modifier = Modifier.fillMaxSize()
             ) {
                 Row(
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 8.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -599,7 +428,7 @@ fun LibraryScreen(
                         onClick = {
                             if (playlistTracks.isNotEmpty()) {
                                 playerController.playTrackList(playlistTracks, 0, playlistName = activePlaylist.name)
-                                playlistForDetailSheet = null
+                                saveAndDismiss()
                             } else {
                                 Toast.makeText(context, "Playlist is empty", Toast.LENGTH_SHORT).show()
                             }
@@ -616,63 +445,78 @@ fun LibraryScreen(
 
                 if (playlistTracks.isEmpty()) {
                     Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(vertical = 32.dp),
+                        modifier = Modifier.fillMaxSize(),
                         contentAlignment = Alignment.Center
                     ) {
                         Text("No tracks in this playlist")
                     }
                 } else {
                     LazyColumn(
+                        state = reorderState.listState,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 400.dp)
+                            .fillMaxSize()
+                            .reorderable(reorderState)
                     ) {
-                        itemsIndexed(playlistTracks) { pIndex, pTrack ->
-                            ListItem(
-                                headlineContent = {
-                                    Text(
-                                        text = pTrack.title,
-                                        maxLines = 1,
-                                        modifier = Modifier.basicMarquee()
-                                    )
-                                },
-                                supportingContent = {
-                                    Text(
-                                        text = pTrack.artist ?: "Unknown Artist",
-                                        maxLines = 1
-                                    )
-                                },
-                                leadingContent = {
-                                    TrackArt(
-                                        track = pTrack,
-                                        modifier = Modifier.size(40.dp),
-                                        iconSize = 20.dp
-                                    )
-                                },
-                                trailingContent = {
-                                    IconButton(
-                                        onClick = {
-                                            activePlaylist.trackIds.remove(pTrack.id)
-                                            libraryRepository.savePlaylist(activePlaylist)
-                                            refreshLibrary()
-                                        }
-                                    ) {
-                                        Icon(
-                                            Icons.Default.Close,
-                                            contentDescription = "Remove from Playlist",
-                                            tint = MaterialTheme.colorScheme.error
+                        items(playlistTracks, key = { it.id }) { pTrack ->
+                            ReorderableItem(reorderState, key = pTrack.id) { isDragging ->
+                                val elevation by animateDpAsState(if (isDragging) 8.dp else 0.dp)
+                                
+                                ListItem(
+                                    headlineContent = {
+                                        Text(
+                                            text = pTrack.title,
+                                            maxLines = 1,
+                                            modifier = Modifier.basicMarquee()
                                         )
-                                    }
-                                },
-                                modifier = Modifier.combinedClickable(
-                                    onClick = {
-                                        playerController.playTrackList(playlistTracks, pIndex, playlistName = activePlaylist.name)
-                                    }
+                                    },
+                                    supportingContent = {
+                                        Text(
+                                            text = pTrack.artist ?: "Unknown Artist",
+                                            maxLines = 1
+                                        )
+                                    },
+                                    leadingContent = {
+                                        TrackArt(
+                                            track = pTrack,
+                                            modifier = Modifier.size(40.dp),
+                                            iconSize = 20.dp
+                                        )
+                                    },
+                                    trailingContent = {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            IconButton(
+                                                onClick = {
+                                                    val updated = playlistTracks.toMutableList()
+                                                    updated.remove(pTrack)
+                                                    playlistTracks = updated
+                                                }
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Close,
+                                                    contentDescription = "Remove from Playlist",
+                                                    tint = MaterialTheme.colorScheme.error
+                                                )
+                                            }
+                                            Icon(
+                                                Icons.Default.DragHandle,
+                                                contentDescription = "Reorder",
+                                                modifier = Modifier.detectReorder(reorderState)
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .shadow(elevation)
+                                        .background(MaterialTheme.colorScheme.surface)
+                                        .combinedClickable(
+                                            onClick = {
+                                                val pIndex = playlistTracks.indexOf(pTrack)
+                                                playerController.playTrackList(playlistTracks, pIndex, playlistName = activePlaylist.name)
+                                                saveAndDismiss()
+                                            }
+                                        )
                                 )
-                            )
-                            HorizontalDivider()
+                                HorizontalDivider()
+                            }
                         }
                     }
                 }

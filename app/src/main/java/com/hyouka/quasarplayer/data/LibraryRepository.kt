@@ -21,6 +21,14 @@ class LibraryRepository(private val context: Context) {
     var savedSearchQuery: String = ""
     var savedSelectedSource: SourceType = SourceType.YOUTUBE
 
+    private val prefs = context.getSharedPreferences("library_prefs", Context.MODE_PRIVATE)
+
+    var savedSortMode: String
+        get() = prefs.getString("sort_mode", "DATE_ADDED") ?: "DATE_ADDED"
+        set(value) {
+            prefs.edit().putString("sort_mode", value).apply()
+        }
+
     private val resultsCache = java.util.concurrent.ConcurrentHashMap<Pair<SourceType, String>, List<SearchResult>>()
 
     fun getCachedResults(source: SourceType, query: String): List<SearchResult>? {
@@ -180,6 +188,32 @@ class LibraryRepository(private val context: Context) {
             }
         }
 
+        val retriever = android.media.MediaMetadataRetriever()
+        for ((id, track) in scannedTracksMap) {
+            val artPath = track.artworkPath
+            if (!artPath.isNullOrBlank() && File(artPath).exists()) {
+                continue
+            }
+
+            try {
+                retriever.setDataSource(context, Uri.parse(track.uri))
+                val picture = retriever.embeddedPicture
+                val artDir = File(context.filesDir, "artworks").apply { mkdirs() }
+                val artFile = File(artDir, "${track.id}.jpg")
+
+                if (picture != null) {
+                    artFile.writeBytes(picture)
+                    scannedTracksMap[id] = track.copy(artworkPath = artFile.absolutePath, hasEmbeddedArt = true)
+                } else {
+                    artFile.createNewFile()
+                    scannedTracksMap[id] = track.copy(artworkPath = artFile.absolutePath, hasEmbeddedArt = false)
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        try { retriever.release() } catch (e: Exception) {}
+
         val resultList = scannedTracksMap.values.sortedByDescending { it.lastModified }
         saveIndex(resultList)
         resultList
@@ -278,6 +312,39 @@ class LibraryRepository(private val context: Context) {
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    suspend fun checkIntegrity(): Int = withContext(Dispatchers.IO) {
+        val tracks = loadCachedIndex().toList()
+        var brokenCount = 0
+        for (track in tracks) {
+            val uri = Uri.parse(track.uri)
+            var isBroken = false
+
+            if (uri.scheme == "file" || track.uri.startsWith("/")) {
+                val path = uri.path ?: track.uri
+                val file = File(path)
+                if (!file.exists() || file.length() == 0L) {
+                    isBroken = true
+                }
+            }
+
+            if (!isBroken) {
+                try {
+                    val retriever = android.media.MediaMetadataRetriever()
+                    retriever.setDataSource(context, uri)
+                    retriever.release()
+                } catch (e: Exception) {
+                    isBroken = true
+                }
+            }
+
+            if (isBroken) {
+                deleteTrack(track)
+                brokenCount++
+            }
+        }
+        brokenCount
     }
 
     // --- playlists ------------------------------------------------------

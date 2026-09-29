@@ -4,7 +4,27 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+
+    <!-- Tilted accretion ring -->
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:rotation="-20">
+        <path
+            android:strokeColor="#8B5CF6"
+            android:strokeWidth="1.8"
+            android:strokeLineCap="round"
+            android:pathData="M87.75,54 A33.75,12.15 0 1 0 20.25,54 A33.75,12.15 0 1 0 87.75,54Z" />
+    </group>
+
+    <!-- Outer star: glow -->
     <path
-        android:fillColor="#D0BCFF"
-        android:pathData="M42,30v30.55c-1.18,-0.68 -2.57,-1.05 -4,-1.05 -4.42,0 -8,3.58 -8,8s3.58,8 8,8 8,-3.58 8,-8V42h18V30H42z" />
+        android:fillColor="#8B5CF6"
+        android:pathData="M54,33.3 L59.85,48.15 L74.7,54 L59.85,59.85 L54,74.7 L48.15,59.85 L33.3,54 L48.15,48.15 Z" />
+
+    <!-- Inner star: bright core -->
+    <path
+        android:fillColor="#F1E9FF"
+        android:pathData="M54,42.3 L57.15,50.85 L65.7,54 L57.15,57.15 L54,65.7 L50.85,57.15 L42.3,54 L50.85,50.85 Z" />
+
 </vector>

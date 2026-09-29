@@ -1,8 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
     <style name="Theme.App.Starting" parent="Theme.SplashScreen">
-        <item name="windowSplashScreenBackground">#FFFBFE</item>
+        <item name="windowSplashScreenBackground">#1C1B1F</item>
         <item name="postSplashScreenTheme">@style/Theme.QuasarPlayer</item>
     </style>
-
-    <style name="Theme.QuasarPlayer" parent="android:Theme.Material.Light.NoActionBar" />
 </resources>

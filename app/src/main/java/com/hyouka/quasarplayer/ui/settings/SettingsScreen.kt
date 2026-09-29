@@ -12,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SystemUpdate
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -27,14 +28,13 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SettingsScreen(
     settingsRepository: SettingsRepository,
-    onRescanLibrary: suspend () -> Unit
+    onRescanLibrary: suspend () -> Unit,
+    onCheckIntegrity: suspend () -> Int
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     val currentTheme by settingsRepository.themeFlow.collectAsState(initial = AppTheme.SYSTEM)
-    val currentLoop by settingsRepository.loopDefaultFlow.collectAsState(initial = 0)
-    val currentShuffle by settingsRepository.shuffleDefaultFlow.collectAsState(initial = false)
     val currentFolder by settingsRepository.musicFolderFlow.collectAsState(initial = "Music/QuasarPlayer")
 
     var isUpdatingDownloader by remember { mutableStateOf(false) }
@@ -103,71 +103,6 @@ fun SettingsScreen(
             }
         }
 
-        // Loop Default Setting
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(text = "Default Loop Mode", style = MaterialTheme.typography.titleMedium)
-                Spacer(modifier = Modifier.height(8.dp))
-                var expanded by remember { mutableStateOf(false) }
-                val loopLabels = listOf("Off", "Repeat One", "Repeat All")
-
-                ExposedDropdownMenuBox(
-                    expanded = expanded,
-                    onExpandedChange = { expanded = !expanded }
-                ) {
-                    OutlinedTextField(
-                        value = loopLabels.getOrElse(currentLoop) { "Off" },
-                        onValueChange = {},
-                        readOnly = true,
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-                        modifier = Modifier
-                            .menuAnchor(MenuAnchorType.PrimaryNotEditable)
-                            .fillMaxWidth()
-                    )
-                    ExposedDropdownMenu(
-                        expanded = expanded,
-                        onDismissRequest = { expanded = false }
-                    ) {
-                        loopLabels.forEachIndexed { index, label ->
-                            DropdownMenuItem(
-                                text = { Text(label) },
-                                onClick = {
-                                    scope.launch { settingsRepository.setLoopDefault(index) }
-                                    expanded = false
-                                }
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // Shuffle Default Setting
-        Card(modifier = Modifier.fillMaxWidth()) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column {
-                    Text(text = "Shuffle by default", style = MaterialTheme.typography.titleMedium)
-                    Text(
-                        text = "Enable shuffle mode on app start",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                Switch(
-                    checked = currentShuffle,
-                    onCheckedChange = { checked ->
-                        scope.launch { settingsRepository.setShuffleDefault(checked) }
-                    }
-                )
-            }
-        }
-
         // Music Folder Setting
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.padding(16.dp)) {
@@ -224,6 +159,46 @@ fun SettingsScreen(
                         Icon(Icons.Default.Refresh, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Rescan Library")
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                var isCheckingIntegrity by remember { mutableStateOf(false) }
+                
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            isCheckingIntegrity = true
+                            try {
+                                val brokenCount = onCheckIntegrity()
+                                if (brokenCount > 0) {
+                                    Toast.makeText(context, "Found and deleted $brokenCount broken files", Toast.LENGTH_LONG).show()
+                                } else {
+                                    Toast.makeText(context, "All files are healthy!", Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                Toast.makeText(context, "Integrity check failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                            } finally {
+                                isCheckingIntegrity = false
+                            }
+                        }
+                    },
+                    enabled = !isCheckingIntegrity && !isScanning,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    if (isCheckingIntegrity) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Checking Integrity...")
+                    } else {
+                        Icon(Icons.Default.Warning, contentDescription = null)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Check File Integrity")
                     }
                 }
             }

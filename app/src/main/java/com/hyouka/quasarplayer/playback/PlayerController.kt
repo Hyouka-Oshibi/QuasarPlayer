@@ -13,7 +13,9 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.MoreExecutors
 import com.hyouka.quasarplayer.data.Track
+import com.hyouka.quasarplayer.ui.settings.SettingsRepository
 import kotlinx.coroutines.*
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -32,6 +34,8 @@ data class PlayerState(
 )
 
 class PlayerController(private val context: Context) {
+    
+    private val settingsRepository = SettingsRepository(context)
 
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
@@ -66,10 +70,12 @@ class PlayerController(private val context: Context) {
 
         override fun onRepeatModeChanged(repeatMode: Int) {
             _state.update { it.copy(repeatMode = repeatMode) }
+            scope.launch { settingsRepository.setLoopDefault(repeatMode) }
         }
 
         override fun onShuffleModeEnabledChanged(shuffleModeEnabled: Boolean) {
             _state.update { it.copy(shuffleModeEnabled = shuffleModeEnabled) }
+            scope.launch { settingsRepository.setShuffleDefault(shuffleModeEnabled) }
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -161,10 +167,16 @@ class PlayerController(private val context: Context) {
 
         val mediaItems = tracks.map { track ->
             val uri = parseUri(track.uri)
-            val metadata = MediaMetadata.Builder()
+            val metadataBuilder = MediaMetadata.Builder()
                 .setTitle(track.title)
                 .setArtist(track.artist ?: "Unknown Artist")
-                .build()
+            if (!track.artworkPath.isNullOrBlank()) {
+                val artFile = File(track.artworkPath)
+                if (artFile.exists() && artFile.length() > 0) {
+                    metadataBuilder.setArtworkUri(Uri.fromFile(artFile))
+                }
+            }
+            val metadata = metadataBuilder.build()
 
             MediaItem.Builder()
                 .setMediaId(track.id)

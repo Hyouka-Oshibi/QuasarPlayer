@@ -111,15 +111,85 @@ class Downloader(
             "QuasarPlayer"
         ).apply { mkdirs() }
 
-        var destFile = File(musicDir, "$sanitizedTitle.m4a")
+        var destFile: File? = null
         var downloadSucceeded = false
 
         try {
-            // 1. High-Speed Download using YoutubeDL Native Engine (Bypasses YouTube Bandwidth Throttling)
-            try {
+            // 1. High-Speed Direct OkHttp Stream Fetch with Identity Encoding & 64KB Buffer
+            if (!streamInfo.audioStreamUrl.isNullOrBlank()) {
+                try {
+                    val request = Request.Builder()
+                        .url(streamInfo.audioStreamUrl)
+                        .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+                        .header("Accept", "*/*")
+                        .header("Accept-Encoding", "identity")
+                        .header("Connection", "keep-alive")
+                        .build()
+
+                    val response = client.newCall(request).execute()
+                    if (response.isSuccessful && response.body != null) {
+                        val contentType = response.header("Content-Type")?.lowercase() ?: ""
+                        
+                        // HLS Playlists cannot be downloaded via OkHttp stream copy. Let yt-dlp handle it natively.
+                        if (contentType.contains("mpegurl") || contentType.contains("application/x-mpegurl") || streamInfo.audioStreamUrl.contains(".m3u8")) {
+                            response.body?.close()
+                            throw Exception("HLS Stream detected. Delegating to yt-dlp fallback.")
+                        }
+
+                        val ext = when {
+                            contentType.contains("mpeg") || contentType.contains("mp3") -> ".mp3"
+                            contentType.contains("webm") || contentType.contains("ogg") -> ".webm"
+                            contentType.contains("mp4") || contentType.contains("m4a") || contentType.contains("aac") -> ".m4a"
+                            streamInfo.audioStreamUrl.contains(".m4a") -> ".m4a"
+                            streamInfo.audioStreamUrl.contains(".webm") -> ".webm"
+                            else -> ".m4a"
+                        }
+
+                        val targetFile = File(musicDir, "$sanitizedTitle$ext")
+                        val tempTargetFile = File(context.cacheDir, "temp_${UUID.randomUUID()}$ext")
+                        val body = response.body!!
+                        val totalBytes = body.contentLength()
+                        val inputStream = body.byteStream()
+                        val outputStream = FileOutputStream(tempTargetFile)
+
+                        val buffer = ByteArray(65536) // 64KB high-speed buffer
+                        var bytesRead: Int
+                        var downloadedBytes = 0L
+
+                        while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                            outputStream.write(buffer, 0, bytesRead)
+                            downloadedBytes += bytesRead
+                            if (totalBytes > 0) {
+                                val progress = downloadedBytes.toFloat() / totalBytes.toFloat()
+                                updateTaskProgress(taskId, progress)
+                            }
+                        }
+
+                        outputStream.flush()
+                        outputStream.close()
+                        inputStream.close()
+
+                        if (tempTargetFile.exists() && tempTargetFile.length() > 0) {
+                            tempTargetFile.copyTo(targetFile, overwrite = true)
+                            tempTargetFile.delete()
+                            destFile = targetFile
+                            downloadSucceeded = true
+                        }
+                    }
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+
+            // Fallback to YoutubeDL native engine if direct stream fetch fails
+            if (!downloadSucceeded || destFile == null) {
+                val fallbackFile = File(musicDir, "$sanitizedTitle.m4a")
+                val tempFallbackFile = File(context.cacheDir, "temp_${UUID.randomUUID()}.m4a")
                 val ytdlReq = YoutubeDLRequest(streamInfo.webpageUrl).apply {
-                    addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
-                    addOption("-o", destFile.absolutePath)
+                    addOption("-f", "bestaudio/best")
+                    addOption("-x")
+                    addOption("--audio-format", "m4a")
+                    addOption("-o", tempFallbackFile.absolutePath)
                     addOption("--no-playlist")
                     addOption("--no-warnings")
                     addOption("--socket-timeout", "15")
@@ -132,71 +202,24 @@ class Downloader(
                     updateTaskProgress(taskId, (progress / 100f).coerceIn(0f, 1f))
                 }
 
-                // Check for resulting file (yt-dlp may auto-append actual container extension)
-                if (!destFile.exists()) {
-                    val candidateFiles = musicDir.listFiles { f ->
-                        f.isFile && f.nameWithoutExtension.equals(sanitizedTitle, ignoreCase = true)
-                    }
-                    if (!candidateFiles.isNullOrEmpty()) {
-                        destFile = candidateFiles.first()
+                if (tempFallbackFile.exists() && tempFallbackFile.length() > 0) {
+                    tempFallbackFile.copyTo(fallbackFile, overwrite = true)
+                    tempFallbackFile.delete()
+                    destFile = fallbackFile
+                } else {
+                    val candidate = context.cacheDir.listFiles { f -> f.isFile && f.nameWithoutExtension.equals(tempFallbackFile.nameWithoutExtension, ignoreCase = true) }?.firstOrNull()
+                    if (candidate != null) {
+                        val finalCandidate = File(musicDir, candidate.name)
+                        candidate.copyTo(finalCandidate, overwrite = true)
+                        candidate.delete()
+                        destFile = finalCandidate
                     }
                 }
-
-                if (destFile.exists() && destFile.length() > 0) {
-                    downloadSucceeded = true
-                }
-            } catch (e: Exception) {
-                e.printStackTrace()
             }
 
-            // Fallback to optimized OkHttp stream download if native YoutubeDL fails
-            if (!downloadSucceeded) {
-                val request = Request.Builder()
-                    .url(streamInfo.audioStreamUrl)
-                    .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
-                    .header("Accept", "*/*")
-                    .header("Connection", "keep-alive")
-                    .build()
-
-                val response = client.newCall(request).execute()
-                if (!response.isSuccessful || response.body == null) {
-                    updateTaskStatus(taskId, DownloadStatus.FAILED, 0f)
-                    return null
-                }
-
-                val contentType = response.header("Content-Type")?.lowercase() ?: ""
-                val ext = when {
-                    contentType.contains("mpeg") || contentType.contains("mp3") -> ".mp3"
-                    contentType.contains("webm") || contentType.contains("ogg") -> ".webm"
-                    contentType.contains("mp4") || contentType.contains("m4a") || contentType.contains("aac") -> ".m4a"
-                    streamInfo.audioStreamUrl.contains(".m4a") -> ".m4a"
-                    streamInfo.audioStreamUrl.contains(".webm") -> ".webm"
-                    else -> ".m4a"
-                }
-
-                destFile = File(musicDir, "$sanitizedTitle$ext")
-
-                val body = response.body!!
-                val totalBytes = body.contentLength()
-                val inputStream = body.byteStream()
-                val outputStream = FileOutputStream(destFile)
-
-                val buffer = ByteArray(16384)
-                var bytesRead: Int
-                var downloadedBytes = 0L
-
-                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                    outputStream.write(buffer, 0, bytesRead)
-                    downloadedBytes += bytesRead
-                    if (totalBytes > 0) {
-                        val progress = downloadedBytes.toFloat() / totalBytes.toFloat()
-                        updateTaskProgress(taskId, progress)
-                    }
-                }
-
-                outputStream.flush()
-                outputStream.close()
-                inputStream.close()
+            if (destFile == null || !destFile.exists()) {
+                updateTaskStatus(taskId, DownloadStatus.FAILED, 0f)
+                return null
             }
 
             // 2. Fetch Thumbnail & Convert to JPEG Bytes with Guaranteed Fallback Candidates
@@ -233,11 +256,15 @@ class Downloader(
                             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, baos)
                             jpegBytes = baos.toByteArray()
 
-                            val artFile = File(artworkDir, "${UUID.randomUUID()}.jpg")
-                            val artFos = FileOutputStream(artFile)
+                            val tempArtFile = File(context.cacheDir, "temp_art_${UUID.randomUUID()}.jpg")
+                            val artFos = FileOutputStream(tempArtFile)
                             artFos.write(jpegBytes)
                             artFos.flush()
                             artFos.close()
+                            
+                            val artFile = File(artworkDir, "${UUID.randomUUID()}.jpg")
+                            tempArtFile.copyTo(artFile, overwrite = true)
+                            tempArtFile.delete()
                             localArtworkFile = artFile
                             break
                         }

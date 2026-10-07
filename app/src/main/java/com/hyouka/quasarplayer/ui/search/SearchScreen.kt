@@ -20,6 +20,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import com.hyouka.quasarplayer.data.LibraryRepository
 import com.hyouka.quasarplayer.source.DownloadStatus
@@ -32,6 +36,7 @@ import com.hyouka.quasarplayer.ui.library.PreviewSheet
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.hyouka.quasarplayer.playback.PlayerController
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -39,10 +44,12 @@ fun SearchScreen(
     libraryRepository: LibraryRepository,
     sourceExtractor: SourceExtractor,
     downloader: Downloader,
+    playerController: PlayerController,
     onLibraryUpdated: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
 
     var searchQuery by remember { mutableStateOf(libraryRepository.savedSearchQuery) }
     var selectedSource by remember { mutableStateOf(libraryRepository.savedSelectedSource) }
@@ -105,11 +112,15 @@ fun SearchScreen(
                 searchQuery = newQuery
                 libraryRepository.savedSearchQuery = newQuery
 
-                val instantDirectResult = sourceExtractor.parseDirectUrlInstant(newQuery)
-                if (instantDirectResult != null) {
-                    val instantList = listOf(instantDirectResult)
-                    searchResults = instantList
-                    libraryRepository.setCachedResults(selectedSource, newQuery, instantList)
+                if (newQuery.startsWith("http://") || newQuery.startsWith("https://")) {
+                    scope.launch {
+                        val directResult = sourceExtractor.parseDirectUrl(newQuery)
+                        if (directResult != null) {
+                            val instantList = listOf(directResult)
+                            searchResults = instantList
+                            libraryRepository.setCachedResults(selectedSource, newQuery, instantList)
+                        }
+                    }
                 } else {
                     val cached = libraryRepository.getCachedResults(selectedSource, newQuery)
                     if (cached != null) {
@@ -133,7 +144,16 @@ fun SearchScreen(
                     }
                 }
             },
-            singleLine = true
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = {
+                    keyboardController?.hide()
+                    if (searchQuery.isNotBlank() && !isSearching) {
+                        performSearch(searchQuery, selectedSource)
+                    }
+                }
+            )
         )
 
         Spacer(modifier = Modifier.height(8.dp))
@@ -293,9 +313,8 @@ fun SearchScreen(
                         trailingContent = {
                             IconButton(
                                 onClick = {
-                                    scope.launch {
-                                        Toast.makeText(context, "Downloading ${result.title}", Toast.LENGTH_SHORT).show()
-                                        val file = downloader.download(result)
+                                    Toast.makeText(context, "Downloading ${result.title}", Toast.LENGTH_SHORT).show()
+                                    downloader.enqueueDownload(result) { file ->
                                         if (file != null) {
                                             onLibraryUpdated()
                                         }
@@ -320,11 +339,11 @@ fun SearchScreen(
         PreviewSheet(
             searchResult = result,
             sourceExtractor = sourceExtractor,
+            playerController = playerController,
             onDismiss = { previewResult = null },
             onDownloadRequested = { searchRes ->
-                scope.launch {
-                    Toast.makeText(context, "Started download for ${searchRes.title}", Toast.LENGTH_SHORT).show()
-                    val file = downloader.download(searchRes)
+                Toast.makeText(context, "Started download for ${searchRes.title}", Toast.LENGTH_SHORT).show()
+                downloader.enqueueDownload(searchRes) { file ->
                     if (file != null) {
                         onLibraryUpdated()
                     } else {

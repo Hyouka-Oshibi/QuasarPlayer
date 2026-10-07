@@ -36,27 +36,17 @@ data class PlayerState(
 class PlayerController(private val context: Context) {
     
     private val settingsRepository = SettingsRepository(context)
-
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
-
     private var controllerFuture: ListenableFuture<MediaController>? = null
     private var mediaController: MediaController? = null
-
-    private var positionUpdateJob: Job? = null
     private var activeQueueTracks: List<Track> = emptyList()
     private var activePlaylistName: String? = null
 
     private val playerListener = object : Player.Listener {
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             _state.update { it.copy(isPlaying = isPlaying) }
-            if (isPlaying) {
-                startPositionTicker()
-            } else {
-                stopPositionTicker()
-            }
             updateStateFromController()
         }
 
@@ -135,29 +125,7 @@ class PlayerController(private val context: Context) {
         }
     }
 
-    private fun startPositionTicker() {
-        positionUpdateJob?.cancel()
-        positionUpdateJob = scope.launch {
-            while (isActive) {
-                mediaController?.let { controller ->
-                    if (controller.isPlaying) {
-                        _state.update {
-                            it.copy(
-                                currentPositionMs = controller.currentPosition.coerceAtLeast(0L),
-                                durationMs = controller.duration.coerceAtLeast(0L)
-                            )
-                        }
-                    }
-                }
-                delay(500L)
-            }
-        }
-    }
-
-    private fun stopPositionTicker() {
-        positionUpdateJob?.cancel()
-        positionUpdateJob = null
-    }
+    fun getCurrentPosition(): Long = mediaController?.currentPosition?.coerceAtLeast(0L) ?: 0L
 
     fun playTrackList(tracks: List<Track>, startIndex: Int = 0, playlistName: String? = null) {
         val controller = mediaController ?: return
@@ -268,7 +236,6 @@ class PlayerController(private val context: Context) {
     }
 
     fun release() {
-        stopPositionTicker()
         mediaController?.removeListener(playerListener)
         controllerFuture?.let { MediaController.releaseFuture(it) }
         scope.cancel()

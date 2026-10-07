@@ -1,0 +1,16 @@
+-keep class com.hyouka.quasarplayer.data.** { *; }
+-keep class com.hyouka.quasarplayer.source.** { *; }
+-keep class androidx.media3.** { *; }
+-keep class com.yausername.youtubedl_android.** { *; }
+-keep class com.yausername.ffmpeg.** { *; }
+-keepclassmembers class * { @com.squareup.moshi.Json <fields>; }
+-keep class kotlin.Metadata { *; }
+-keep class com.hyouka.quasarplayer.ui.settings.AppTheme { *; }
+-keep class com.fasterxml.jackson.** { *; }
+-keep class org.apache.commons.compress.** { *; }
+-keep class org.jaudiotagger.** { *; }
+-dontwarn com.fasterxml.jackson.**
+-dontwarn java.beans.**
+-dontwarn org.w3c.dom.**
+-dontwarn org.apache.commons.compress.**
+-dontwarn org.jaudiotagger.**

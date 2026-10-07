@@ -20,6 +20,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.ui.unit.dp
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.ui.draw.shadow
@@ -53,6 +58,8 @@ fun LibraryScreen(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var isRefreshing by remember { mutableStateOf(false) }
 
     var searchQuery by remember { mutableStateOf(libraryRepository.savedSearchQuery) }
     var sortMode by remember { 
@@ -210,7 +217,11 @@ fun LibraryScreen(
                     }
                 }
             },
-            singleLine = true
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+            keyboardActions = KeyboardActions(
+                onSearch = { keyboardController?.hide() }
+            )
         )
 
         Spacer(modifier = Modifier.height(16.dp))
@@ -230,7 +241,19 @@ fun LibraryScreen(
         }
 
         // Tab Content
-        when (selectedTab) {
+        PullToRefreshBox(
+            isRefreshing = isRefreshing,
+            onRefresh = {
+                scope.launch {
+                    isRefreshing = true
+                    libraryRepository.scanLibrary()
+                    refreshLibrary()
+                    isRefreshing = false
+                }
+            },
+            modifier = Modifier.weight(1f).fillMaxWidth()
+        ) {
+            when (selectedTab) {
             LibraryTab.TRACKS -> {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -372,6 +395,7 @@ fun LibraryScreen(
                     }
                 }
             }
+        }
         }
     }
 
@@ -543,6 +567,7 @@ fun LibraryScreen(
                 ListItem(
                     headlineContent = { Text("Select / Multi-Select") },
                     leadingContent = { Icon(Icons.Default.CheckBox, contentDescription = null) },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
                     modifier = Modifier.combinedClickable(
                         onClick = {
                             isSelectionMode = true
@@ -556,6 +581,7 @@ fun LibraryScreen(
                 ListItem(
                     headlineContent = { Text("Rename Track") },
                     leadingContent = { Icon(Icons.Default.Edit, contentDescription = null) },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
                     modifier = Modifier.combinedClickable(
                         onClick = {
                             showRenameDialog = targetTrack
@@ -568,6 +594,7 @@ fun LibraryScreen(
                 ListItem(
                     headlineContent = { Text("Add to Playlist") },
                     leadingContent = { Icon(Icons.AutoMirrored.Filled.PlaylistAdd, contentDescription = null) },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
                     modifier = Modifier.combinedClickable(
                         onClick = {
                             showAddToPlaylistDialog = targetTrack
@@ -588,6 +615,7 @@ fun LibraryScreen(
                             tint = MaterialTheme.colorScheme.error
                         )
                     },
+                    colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent),
                     modifier = Modifier.combinedClickable(
                         onClick = {
                             scope.launch(Dispatchers.IO) {

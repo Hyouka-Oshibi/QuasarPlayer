@@ -11,7 +11,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.media3.common.Player
 import com.hyouka.quasarplayer.playback.PlayerController
+import androidx.lifecycle.repeatOnLifecycle
 import com.hyouka.quasarplayer.ui.common.TrackArt
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 @Composable
 fun PlayingScreen(playerController: PlayerController) {
@@ -75,7 +78,23 @@ fun PlayingScreen(playerController: PlayerController) {
             var sliderPosition by remember { mutableFloatStateOf(0f) }
             var isUserSeeking by remember { mutableStateOf(false) }
 
-            val currentPos = state.currentPositionMs.toFloat()
+            var currentPosMs by remember(state.currentTrack) { mutableLongStateOf(playerController.getCurrentPosition()) }
+            val lifecycleOwner = androidx.compose.ui.platform.LocalLifecycleOwner.current
+
+            LaunchedEffect(lifecycleOwner, state.isPlaying, state.currentTrack) {
+                if (state.isPlaying) {
+                    lifecycleOwner.lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) {
+                        while (isActive) {
+                            currentPosMs = playerController.getCurrentPosition()
+                            delay(500L)
+                        }
+                    }
+                } else {
+                    currentPosMs = playerController.getCurrentPosition()
+                }
+            }
+
+            val currentPos = currentPosMs.toFloat()
             val totalDuration = state.durationMs.coerceAtLeast(1L).toFloat()
 
             val displayPos = if (isUserSeeking) sliderPosition else currentPos

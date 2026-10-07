@@ -18,11 +18,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import com.yausername.youtubedl_android.YoutubeDL
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.lifecycle.Lifecycle
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,10 +43,29 @@ fun SettingsScreen(
 
     val currentTheme by settingsRepository.themeFlow.collectAsState(initial = AppTheme.SYSTEM)
     val currentFolder by settingsRepository.musicFolderFlow.collectAsState(initial = "Music/QuasarPlayer")
+    val sleepModeEnabled by settingsRepository.sleepModeEnabledFlow.collectAsState(initial = false)
+    val sleepModeEndTimestamp by settingsRepository.sleepModeEndTimestampFlow.collectAsState(initial = 0L)
+
+    var sleepHoursInput by remember { mutableStateOf("") }
+    var sleepMinutesInput by remember { mutableStateOf("") }
 
     var isUpdatingDownloader by remember { mutableStateOf(false) }
     var isScanning by remember { mutableStateOf(false) }
     var ytdlpVersion by remember { mutableStateOf("Checking...") }
+
+    var currentTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    LaunchedEffect(sleepModeEnabled, lifecycleOwner) {
+        if (sleepModeEnabled) {
+            lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
+                while (isActive) {
+                    currentTime = System.currentTimeMillis()
+                    delay(1000L)
+                }
+            }
+        }
+    }
 
     LaunchedEffect(Unit) {
         withContext(Dispatchers.IO) {
@@ -199,6 +225,79 @@ fun SettingsScreen(
                         Icon(Icons.Default.Warning, contentDescription = null)
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Check File Integrity")
+                    }
+                }
+            }
+        }
+
+        // Sleep Mode
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(text = "Sleep Mode", style = MaterialTheme.typography.titleMedium)
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                if (sleepModeEnabled) {
+                    val remainingMs = sleepModeEndTimestamp - currentTime
+                    val remainingText = if (remainingMs > 0) {
+                        val totalMins = remainingMs / 60000
+                        val h = totalMins / 60
+                        val m = totalMins % 60
+                        "Ends in: ${h}h ${m}m"
+                    } else "Expired (Will pause before next track)"
+                    
+                    Text(
+                        text = "Sleep mode is ON. $remainingText",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = { scope.launch { settingsRepository.setSleepModeEnabled(false) } },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Turn Off Sleep Mode")
+                    }
+                } else {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = sleepHoursInput,
+                            onValueChange = { sleepHoursInput = it },
+                            label = { Text("Hours") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = sleepMinutesInput,
+                            onValueChange = { sleepMinutesInput = it },
+                            label = { Text("Minutes") },
+                            modifier = Modifier.weight(1f),
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Button(
+                        onClick = {
+                            val h = sleepHoursInput.toLongOrNull() ?: 0L
+                            val m = sleepMinutesInput.toLongOrNull() ?: 0L
+                            if (h > 0 || m > 0) {
+                                val durationMs = (h * 60 + m) * 60 * 1000
+                                val targetTime = System.currentTimeMillis() + durationMs
+                                scope.launch {
+                                    settingsRepository.setSleepModeEndTimestamp(targetTime)
+                                    settingsRepository.setSleepModeEnabled(true)
+                                }
+                            } else {
+                                Toast.makeText(context, "Please enter a valid time", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("Turn On Sleep Mode")
                     }
                 }
             }

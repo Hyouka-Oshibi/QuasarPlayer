@@ -13,14 +13,7 @@ import java.io.FileOutputStream
 import java.io.InputStream
 import java.util.UUID
 
-/**
- * A custom DataSource that mitigates file handle exhaustion and MediaStore
- * read timeouts by copying local media files (content:// or file://) to a
- * temporary file in the app's internal cache before playback, playing from
- * the cache, and then deleting the temporary file when closed.
- */
 class CachedCopyDataSource(private val context: Context) : DataSource {
-
     private var activeDataSource: DataSource? = null
     private var tempFile: File? = null
     private val defaultDataSource = DefaultDataSource.Factory(context).createDataSource()
@@ -35,13 +28,11 @@ class CachedCopyDataSource(private val context: Context) : DataSource {
         val originalUri = dataSpec.uri
         val scheme = originalUri.scheme
 
-        // Don't cache remote streams or unexpected schemes
         if (scheme == "http" || scheme == "https" || scheme == "rtmp") {
             activeDataSource = defaultDataSource
             return activeDataSource!!.open(dataSpec)
         }
 
-        // Copy local file/content to temp file
         tempFile = File(context.cacheDir, "quasar_playback_${UUID.randomUUID()}.tmp")
         
         val inputStream: InputStream? = try {
@@ -69,14 +60,12 @@ class CachedCopyDataSource(private val context: Context) : DataSource {
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
-                // If copy fails, fallback to default data source
                 tempFile?.delete()
                 tempFile = null
                 activeDataSource = defaultDataSource
                 return activeDataSource!!.open(dataSpec)
             }
         } else {
-            // Fallback if we couldn't open input stream
             activeDataSource = defaultDataSource
             return activeDataSource!!.open(dataSpec)
         }

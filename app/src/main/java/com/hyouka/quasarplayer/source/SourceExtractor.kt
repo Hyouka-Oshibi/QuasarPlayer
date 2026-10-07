@@ -28,6 +28,7 @@ data class SearchResult(
 )
 
 data class StreamInfo(
+    val id: String,
     val audioStreamUrl: String,
     val title: String,
     val uploader: String?,
@@ -71,24 +72,43 @@ class SourceExtractor(private val context: Context) {
         }
     }
 
-    fun parseDirectUrlInstant(url: String): SearchResult? {
+    suspend fun parseDirectUrl(url: String): SearchResult? = withContext(Dispatchers.IO) {
         val trimmed = url.trim()
-        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return null
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return@withContext null
 
-        // 1. Check YouTube Video ID
+        val client = okhttp3.OkHttpClient()
+
         val ytPatterns = listOf(
             Regex("(?:youtube\\.com\\/watch\\?v=|youtu\\.be\\/|youtube\\.com\\/shorts\\/)([A-Za-z0-9_-]{11})"),
             Regex("youtube\\.com\\/embed\\/([A-Za-z0-9_-]{11})")
         )
-
         for (pattern in ytPatterns) {
             val match = pattern.find(trimmed)
             if (match != null) {
                 val videoId = match.groupValues[1]
-                return SearchResult(
+                var title = "YouTube Video"
+                var author = "YouTube"
+                try {
+                    val req = okhttp3.Request.Builder()
+                        .url("https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=$videoId&format=json")
+                        .build()
+                    val res = client.newCall(req).execute()
+                    if (res.isSuccessful) {
+                        val body = res.body?.string()
+                        if (body != null) {
+                            val map = moshi.adapter(Map::class.java).fromJson(body) as? Map<*, *>
+                            if (map != null) {
+                                title = map["title"]?.toString() ?: title
+                                author = map["author_name"]?.toString() ?: author
+                            }
+                        }
+                    }
+                } catch (e: Exception) {}
+
+                return@withContext SearchResult(
                     id = videoId,
-                    title = "Direct Video ($videoId)",
-                    uploader = "YouTube Direct Link",
+                    title = title,
+                    uploader = author,
                     durationMs = 0L,
                     thumbnailUrl = "https://i.ytimg.com/vi/$videoId/hqdefault.jpg",
                     source = SourceType.YOUTUBE,
@@ -97,25 +117,61 @@ class SourceExtractor(private val context: Context) {
             }
         }
 
-        // 2. Check SoundCloud Link
         if (trimmed.contains("soundcloud.com/")) {
-            val pathSegments = trimmed.split("soundcloud.com/").getOrNull(1)?.split("?")?.getOrNull(0)?.split("/") ?: emptyList()
-            val artist = pathSegments.getOrNull(0)?.replace("-", " ")?.replaceFirstChar { it.uppercase() } ?: "SoundCloud Artist"
-            val trackTitle = pathSegments.getOrNull(1)?.replace("-", " ")?.replaceFirstChar { it.uppercase() } ?: "SoundCloud Track"
-            val cleanId = (pathSegments.getOrNull(1) ?: trimmed).hashCode().toString()
+            var title = "SoundCloud Track"
+            var author = "SoundCloud"
+            var thumb: String? = null
+            var duration = 0L
 
-            return SearchResult(
+            try {
+                var finalUrl = trimmed.replace("m.soundcloud.com", "soundcloud.com")
+                if (finalUrl.contains("on.soundcloud.com")) {
+                    val redirectReq = okhttp3.Request.Builder().url(finalUrl).head().build()
+                    val redirectRes = client.newCall(redirectReq).execute()
+                    finalUrl = redirectRes.request.url.toString().replace("m.soundcloud.com", "soundcloud.com")
+                }
+
+                val clientId = getSoundCloudClientId(client)
+                if (clientId != null) {
+                    val resolveUrl = okhttp3.HttpUrl.Builder()
+                        .scheme("https")
+                        .host("api-v2.soundcloud.com")
+                        .addPathSegment("resolve")
+                        .addQueryParameter("url", finalUrl)
+                        .addQueryParameter("client_id", clientId)
+                        .build()
+
+                    val req = okhttp3.Request.Builder().url(resolveUrl).build()
+                    val res = client.newCall(req).execute()
+                    if (res.isSuccessful) {
+                        val body = res.body?.string()
+                        if (body != null) {
+                            val map = moshi.adapter(Map::class.java).fromJson(body) as? Map<*, *>
+                            if (map != null) {
+                                title = map["title"]?.toString() ?: title
+                                val user = map["user"] as? Map<*, *>
+                                author = user?.get("username")?.toString() ?: author
+                                thumb = map["artwork_url"]?.toString()?.replace("-large", "-t500x500") ?: thumb
+                                duration = (map["duration"] as? Number)?.toLong() ?: 0L
+                            }
+                        }
+                    }
+                }
+            } catch (e: Exception) {}
+
+            val cleanId = trimmed.hashCode().toString()
+            return@withContext SearchResult(
                 id = cleanId,
-                title = if (pathSegments.size >= 2) trackTitle else "SoundCloud Link",
-                uploader = artist,
-                durationMs = 0L,
-                thumbnailUrl = null,
+                title = MetadataCleaner.cleanTitle(title),
+                uploader = MetadataCleaner.cleanChannelName(author),
+                durationMs = duration,
+                thumbnailUrl = thumb,
                 source = SourceType.SOUNDCLOUD,
                 webpageUrl = trimmed
             )
         }
 
-        return null
+        return@withContext null
     }
 
     private suspend fun nativeYouTubeSearch(query: String): List<SearchResult> = withContext(Dispatchers.IO) {
@@ -283,29 +339,29 @@ class SourceExtractor(private val context: Context) {
         }
         return@withContext results
     }
-
     suspend fun search(query: String, source: SourceType): List<SearchResult> = withContext(Dispatchers.IO) {
         val trimmedQuery = query.trim()
         if (trimmedQuery.isEmpty()) return@withContext emptyList()
 
-        val cacheKey = "$source:$trimmedQuery"
-        cache[cacheKey]?.let { return@withContext it }
-
-        // Fast Instant Resolution for Direct URLs (0ms)
-        val instantResult = parseDirectUrlInstant(trimmedQuery)
-        if (instantResult != null) {
-            val actualSource = instantResult.source
-            val instantList = listOf(instantResult)
-            cache[cacheKey] = instantList
-
-            // Asynchronously fetch rich metadata in background without blocking UI
-            scope.launch {
-                fetchFullMetadataForUrl(trimmedQuery, actualSource, cacheKey)
-            }
-            return@withContext instantList
+        val isDirectUrl = trimmedQuery.startsWith("http://") || trimmedQuery.startsWith("https://")
+        
+        val actualSource = if (isDirectUrl) {
+            if (trimmedQuery.contains("soundcloud.com")) SourceType.SOUNDCLOUD else SourceType.YOUTUBE
+        } else {
+            source
         }
 
-        val isDirectUrl = trimmedQuery.startsWith("http://") || trimmedQuery.startsWith("https://")
+        val cacheKey = "${actualSource.name}_$trimmedQuery"
+        cache[cacheKey]?.let { return@withContext it }
+
+        if (isDirectUrl) {
+            val directResult = parseDirectUrl(trimmedQuery)
+            if (directResult != null) {
+                val list = listOf(directResult)
+                cache[cacheKey] = list
+                return@withContext list
+            }
+        }
         
         if (!isDirectUrl && source == SourceType.YOUTUBE) {
             val results = nativeYouTubeSearch(trimmedQuery)
@@ -407,64 +463,9 @@ class SourceExtractor(private val context: Context) {
         results
     }
 
-    private fun fetchFullMetadataForUrl(url: String, source: SourceType, cacheKey: String) {
-        try {
-            val request = YoutubeDLRequest(url).apply {
-                addOption("--dump-json")
-                addOption("--no-playlist")
-                addOption("--skip-download")
-                addOption("--no-warnings")
-                addOption("--socket-timeout", "5")
-                if (source == SourceType.YOUTUBE) {
-                    addOption("--extractor-args", "youtube:player_client=android")
-                }
-            }
-
-            val response = YoutubeDL.getInstance().execute(request)
-            val line = response.out.lines().firstOrNull { it.isNotBlank() } ?: return
-            val mapAdapter = moshi.adapter(Map::class.java)
-            val map = mapAdapter.fromJson(line) as? Map<*, *> ?: return
-
-            val id = map["id"]?.toString() ?: return
-            val rawTitle = map["title"]?.toString() ?: "Unknown Title"
-            val rawChannel = map["channel"]?.toString()
-                ?: map["uploader"]?.toString()
-                ?: map["artist"]?.toString()
-                ?: map["creator"]?.toString()
-
-            val cleanedTitle = MetadataCleaner.cleanTitle(rawTitle)
-            val cleanedArtist = MetadataCleaner.cleanChannelName(rawChannel)
-
-            val durationSec = (map["duration"] as? Number)?.toDouble() ?: 0.0
-            val durationMs = (durationSec * 1000).toLong()
-
-            val thumbnails = map["thumbnails"] as? List<*>
-            val thumbnailUrl = (thumbnails?.filterIsInstance<Map<*, *>>()?.lastOrNull {
-                val u = it["url"]?.toString() ?: ""
-                !u.contains(".webp") && !u.contains(".avif")
-            } ?: thumbnails?.lastOrNull() as? Map<*, *>)?.get("url")?.toString()
-                ?: map["thumbnail"]?.toString()
-                ?: if (source == SourceType.YOUTUBE) "https://i.ytimg.com/vi/$id/hqdefault.jpg" else null
-
-            val result = SearchResult(
-                id = id,
-                title = cleanedTitle,
-                uploader = cleanedArtist,
-                durationMs = durationMs,
-                thumbnailUrl = thumbnailUrl,
-                source = source,
-                webpageUrl = url
-            )
-
-            cache[cacheKey] = listOf(result)
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-    }
-
     suspend fun getStreamInfo(result: SearchResult): StreamInfo? = withContext(Dispatchers.IO) {
         val request = YoutubeDLRequest(result.webpageUrl).apply {
-            addOption("-f", "bestaudio[ext=m4a]/bestaudio/best")
+            addOption("-f", "251/bestaudio/best")
             addOption("--dump-json")
             addOption("--no-warnings")
             addOption("--socket-timeout", "8")
@@ -508,6 +509,7 @@ class SourceExtractor(private val context: Context) {
                 ?: if (!id.isNullOrBlank()) "https://i.ytimg.com/vi/$id/hqdefault.jpg" else result.thumbnailUrl
 
             StreamInfo(
+                id = result.id,
                 audioStreamUrl = streamUrl,
                 title = cleanedTitle,
                 uploader = cleanedArtist,

@@ -14,3 +14,7 @@
 .externalNativeBuild
 .cxx
 .kotlin
+
+# APKs and Keystores
+*.apk
+*.keystore

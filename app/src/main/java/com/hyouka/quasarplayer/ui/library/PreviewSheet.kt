@@ -23,12 +23,14 @@ import com.hyouka.quasarplayer.ui.common.NetworkImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import com.hyouka.quasarplayer.playback.PlayerController
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PreviewSheet(
     searchResult: SearchResult,
     sourceExtractor: SourceExtractor,
+    playerController: PlayerController,
     onDismiss: () -> Unit,
     onDownloadRequested: (SearchResult) -> Unit
 ) {
@@ -41,6 +43,7 @@ fun PreviewSheet(
     var durationMs by remember { mutableLongStateOf(searchResult.durationMs) }
 
     var exoPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
+    var wasPlayingMain by remember { mutableStateOf(false) }
 
     // Resolve stream info and setup throwaway ExoPlayer
     LaunchedEffect(searchResult) {
@@ -50,6 +53,10 @@ fun PreviewSheet(
                 streamInfo = resolved
                 isLoadingStream = false
                 if (resolved != null) {
+                    wasPlayingMain = playerController.state.value.isPlaying
+                    if (wasPlayingMain) {
+                        playerController.pause()
+                    }
                     val player = ExoPlayer.Builder(context).build()
                     exoPlayer = player
                     val mediaItem = MediaItem.fromUri(resolved.audioStreamUrl)
@@ -88,11 +95,15 @@ fun PreviewSheet(
             exoPlayer?.stop()
             exoPlayer?.release()
             exoPlayer = null
+            if (wasPlayingMain) {
+                playerController.play()
+            }
         }
     }
 
     ModalBottomSheet(
-        onDismissRequest = onDismiss
+        onDismissRequest = onDismiss,
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ) {
         Column(
             modifier = Modifier

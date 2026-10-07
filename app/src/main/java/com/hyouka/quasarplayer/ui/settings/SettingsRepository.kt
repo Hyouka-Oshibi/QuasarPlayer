@@ -21,6 +21,8 @@ class SettingsRepository(private val context: Context) {
         val SHUFFLE_DEFAULT = booleanPreferencesKey("shuffle_default")
         val MUSIC_FOLDER = stringPreferencesKey("music_folder")
         val LAST_YTDLP_CHECK = longPreferencesKey("last_ytdlp_check")
+        val SLEEP_MODE_ENABLED = booleanPreferencesKey("sleep_mode_enabled")
+        val SLEEP_MODE_END_TIMESTAMP = longPreferencesKey("sleep_mode_end_timestamp")
     }
 
     val themeFlow: Flow<AppTheme> = context.dataStore.data.map { prefs ->
@@ -45,6 +47,14 @@ class SettingsRepository(private val context: Context) {
 
     val lastYtdlpCheckFlow: Flow<Long> = context.dataStore.data.map { prefs ->
         prefs[PreferencesKeys.LAST_YTDLP_CHECK] ?: 0L
+    }
+
+    val sleepModeEnabledFlow: Flow<Boolean> = context.dataStore.data.map { prefs ->
+        prefs[PreferencesKeys.SLEEP_MODE_ENABLED] ?: false
+    }
+
+    val sleepModeEndTimestampFlow: Flow<Long> = context.dataStore.data.map { prefs ->
+        prefs[PreferencesKeys.SLEEP_MODE_END_TIMESTAMP] ?: 0L
     }
 
     suspend fun setTheme(theme: AppTheme) {
@@ -74,6 +84,18 @@ class SettingsRepository(private val context: Context) {
     suspend fun setLastYtdlpCheck(timestamp: Long) {
         context.dataStore.edit { prefs ->
             prefs[PreferencesKeys.LAST_YTDLP_CHECK] = timestamp
+        }
+    }
+
+    suspend fun setSleepModeEnabled(enabled: Boolean) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.SLEEP_MODE_ENABLED] = enabled
+        }
+    }
+
+    suspend fun setSleepModeEndTimestamp(timestamp: Long) {
+        context.dataStore.edit { prefs ->
+            prefs[PreferencesKeys.SLEEP_MODE_END_TIMESTAMP] = timestamp
         }
     }
 }

@@ -72,11 +72,11 @@ class MainActivity : ComponentActivity() {
         splashScreen.setKeepOnScreenCondition { keepSplash }
         super.onCreate(savedInstanceState)
 
-        libraryRepository = LibraryRepository(applicationContext)
-        playerController = PlayerController(applicationContext)
         settingsRepository = SettingsRepository(applicationContext)
+        libraryRepository = LibraryRepository(applicationContext, settingsRepository)
+        playerController = PlayerController(applicationContext)
         sourceExtractor = SourceExtractor(applicationContext)
-        downloader = Downloader(applicationContext, libraryRepository, sourceExtractor)
+        downloader = Downloader(applicationContext, libraryRepository, sourceExtractor, settingsRepository)
 
         setContent {
             val themeState by settingsRepository.themeFlow.collectAsState(initial = null)
@@ -95,16 +95,14 @@ class MainActivity : ComponentActivity() {
 
             val colorScheme = if (darkTheme) darkColorScheme() else lightColorScheme()
 
-            // Request runtime permissions on launch
             RequestPermissionsOnLaunch()
 
-            // Throttled yt-dlp update check on app launch
             LaunchedEffect(Unit) {
                 withContext(Dispatchers.IO) {
                     try {
                         val lastCheck = settingsRepository.lastYtdlpCheckFlow.firstOrNull() ?: 0L
                         val now = System.currentTimeMillis()
-                        if (now - lastCheck > 3 * 24 * 3600 * 1000L) { // 3 days
+                        if (now - lastCheck > 3 * 24 * 3600 * 1000L) {
                             YoutubeDL.getInstance().updateYoutubeDL(applicationContext, YoutubeDL.UpdateChannel.STABLE)
                             settingsRepository.setLastYtdlpCheck(now)
                         }
@@ -250,6 +248,7 @@ private fun AppScaffold(
                     libraryRepository = libraryRepository,
                     sourceExtractor = sourceExtractor,
                     downloader = downloader,
+                    playerController = playerController,
                     onLibraryUpdated = { coroutineScope.launch { libraryRepository.scanLibrary() } }
                 )
             }

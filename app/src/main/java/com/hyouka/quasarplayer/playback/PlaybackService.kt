@@ -16,14 +16,11 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/**
- * Owns the single ExoPlayer instance for the whole app and exposes it via
- * a MediaSession. This is what keeps audio playing when the app is
- * backgrounded and drives lock-screen / notification controls.
- */
 class PlaybackService : MediaSessionService() {
 
     private var mediaSession: MediaSession? = null
+    private var sleepModeEnabled = false
+    private var sleepModeEndTimestamp = 0L
 
     override fun onCreate() {
         super.onCreate()
@@ -35,14 +32,61 @@ class PlaybackService : MediaSessionService() {
         val player = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setHandleAudioBecomingNoisy(true)
+            .setWakeMode(androidx.media3.common.C.WAKE_MODE_LOCAL)
             .build()
 
+        val audioOffloadPreferences = androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences.Builder()
+            .setAudioOffloadMode(androidx.media3.common.TrackSelectionParameters.AudioOffloadPreferences.AUDIO_OFFLOAD_MODE_ENABLED)
+            .setIsGaplessSupportRequired(true)
+            .build()
+
+        player.trackSelectionParameters = player.trackSelectionParameters
+            .buildUpon()
+            .setAudioOffloadPreferences(audioOffloadPreferences)
+            .build()
+
+        val intent = android.content.Intent(this, com.hyouka.quasarplayer.MainActivity::class.java).apply {
+            flags = android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = android.app.PendingIntent.getActivity(
+            this,
+            0,
+            intent,
+            android.app.PendingIntent.FLAG_IMMUTABLE or android.app.PendingIntent.FLAG_UPDATE_CURRENT
+        )
+
         mediaSession = MediaSession.Builder(this, player)
+            .setSessionActivity(pendingIntent)
             .setCallback(MediaSessionCallback())
             .build()
 
+        val settingsRepo = SettingsRepository(this@PlaybackService)
+
+        player.addListener(object : Player.Listener {
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                if (sleepModeEnabled) {
+                    val now = System.currentTimeMillis()
+                    if (now >= sleepModeEndTimestamp) {
+                        player.pause()
+                        CoroutineScope(Dispatchers.IO).launch {
+                            settingsRepo.setSleepModeEnabled(false)
+                        }
+                    }
+                }
+            }
+        })
+
         CoroutineScope(Dispatchers.IO).launch {
-            val settingsRepo = SettingsRepository(this@PlaybackService)
+            launch {
+                settingsRepo.sleepModeEnabledFlow.collect { enabled ->
+                    sleepModeEnabled = enabled
+                }
+            }
+            launch {
+                settingsRepo.sleepModeEndTimestampFlow.collect { timestamp ->
+                    sleepModeEndTimestamp = timestamp
+                }
+            }
             val loop = settingsRepo.loopDefaultFlow.first()
             val shuffle = settingsRepo.shuffleDefaultFlow.first()
             withContext(Dispatchers.Main) {
